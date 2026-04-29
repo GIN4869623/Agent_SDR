@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw SDR 控制中枢</title>
+    <link rel="stylesheet" href="css/app.css?v=6">
+</head>
+<body>
+
+    <header>
+        <div class="brand">
+            <div class="logo-box">
+                <div class="logo-frame">
+                    <img src="屏幕截图 .png" alt="合作院校标识">
+                </div>
+            </div>
+            <h1>OpenClaw SDR 控制中枢</h1>
+        </div>
+        <div class="header-actions">
+            <button onclick="clearContext()" title="清除大模型的聊天记忆，防止产生幻觉">🧹 清除终端记忆 (Reset)</button>
+        </div>
+    </header>
+
+    <main>
+        <div id="chat-section">
+            <div id="chat-box">
+                <div class="message ai-wrapper">
+                    <img class="avatar ai-avatar" src="https://api.iconify.design/fluent-emoji/robot.svg" alt="AI">
+                    <div class="msg-content">
+                        <div class="msg-bubble">
+                            系统内核已挂载。USRP 物理层通道就绪。<br><br>
+                            我是您的 6G AI 控制中枢。您可以直接在下方输入框下达自然语言指令。建议在执行不同类型任务前，点击右上角【清除终端记忆】以保持最佳状态。
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="input-area">
+                <div class="input-toolbar">
+                    <div class="mode-switch" role="tablist" aria-label="大模型模式切换">
+                        <button type="button" class="mode-btn active" data-mode="think" id="think-mode-btn" onclick="setModelMode('think')">think</button>
+                        <button type="button" class="mode-btn" data-mode="fast" id="fast-mode-btn" onclick="setModelMode('fast')">fast</button>
+                    </div>
+                    <div class="model-indicator" aria-live="polite">
+                        <span class="model-indicator-label">当前模型</span>
+                        <strong id="active-model-name">加载中...</strong>
+                        <span class="model-indicator-hint" id="active-model-hint">等待后端配置</span>
+                    </div>
+                    <div class="temperature-control" aria-label="Temperature 手动调节">
+                        <label class="temperature-label" for="temperature-slider">temperature</label>
+                        <input
+                            type="range"
+                            id="temperature-slider"
+                            min="0"
+                            max="2"
+                            step="0.05"
+                            value="0.20"
+                        >
+                        <div class="temperature-meta">
+                            <output id="temperature-value" for="temperature-slider">0.20</output>
+                            <span class="temperature-hint">低更稳 / 高更活</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="composer-row">
+                    <input type="text" id="user-input" placeholder="root@sdr-agent:~# 输入指令..." autocomplete="off">
+                    <button id="send-btn" onclick="sendMessage()">发送消息</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="hardware-panel">
+            <div class="hardware-header">📡 物理层拓扑 (SDR Topology)</div>
+            <div class="topology-map topology-container">
+                
+                <button class="device-card" type="button" onclick="handleUSRPClick('USRP-01')">
+                    <img class="device-icon real-hw-icon" src="assets/OIP.webp" alt="USRP-01">
+                    <div class="device-meta">
+                        <span class="device-name">USRP-01</span>
+                        <span class="device-role">Tx / Rx Node</span>
+                        <span class="mod-badge mod-bpsk" id="usrp1-mod-badge">MODE: BPSK (Default)</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-dot status-online" id="usrp1-card-dot"></span>
+                        <span id="usrp1-card-text">在线</span>
+                    </div>
+                </button>
+
+                <div class="topology-link" aria-hidden="true"></div>
+
+                <button class="device-card" type="button" onclick="handleUSRPClick('USRP-02')">
+                    <img class="device-icon real-hw-icon" src="assets/OIP.webp" alt="USRP-02">
+                    <div class="device-meta">
+                        <span class="device-name">USRP-02</span>
+                        <span class="device-role">Rx Node</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="status-dot status-offline"></span>
+                        <span>离线</span>
+                    </div>
+                </button>
+
+                <div class="scene-display">
+                    <div class="scene-title">🏠 物理部署图 (Physical Deployment)</div>
+                    <div class="scene-canvas">
+                        <div class="scene-row top">
+                            <div class="scene-node scene-server">
+                                <img class="real-hw-icon" src="assets/Server.png" alt="Core Server">
+                                <div class="node-details">
+                                    <div class="scene-node-name">Core Server</div>
+                                    <div class="scene-node-ip" id="deploy-server-ip">IP: 加载中...</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="scene-line-vertical" aria-hidden="true"></div>
+
+                        <div class="scene-row middle">
+                            <div class="scene-node scene-switch">
+                                <img class="real-hw-icon" src="assets/Switch.jpg" alt="Gigabit Switch">
+                                <div class="node-details">
+                                    <div class="scene-node-name">Gigabit Switch</div>
+                                    <div class="scene-node-ip">Layer 2 Bridge</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="scene-line-bus-wrap" aria-hidden="true">
+                            <div class="scene-trunk"></div><div class="scene-distribution"></div>
+                            <div class="scene-drop-left"></div><div class="scene-drop-right"></div>
+                        </div>
+
+                        <div class="scene-row bottom">
+                            <div class="scene-node scene-usrp online-node" id="usrp1-scene-node">
+                                <img src="assets/OIP.webp" alt="USRP-01" class="real-hw-icon">
+                                <div class="node-details">
+                                    <div class="scene-node-name">USRP-01</div>
+                                    <div class="scene-node-ip" id="deploy-usrp1-ip">IP: 加载中...</div>
+                                </div>
+                            </div>
+                            
+                            <div class="scene-node scene-usrp offline-node">
+                                <img src="assets/OIP.webp" alt="USRP-02" class="real-hw-icon">
+                                <div class="node-details">
+                                    <div class="scene-node-name">USRP-02</div>
+                                    <div class="scene-node-ip" id="deploy-usrp2-ip">IP: 加载中...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="status-legend topology-legend">
+                    <div class="legend-item"><span class="status-dot status-online"></span><span>在线</span></div>
+                    <div class="legend-item"><span class="status-dot status-offline"></span><span>离线</span></div>
+                    <div class="legend-item"><span class="status-dot status-active"></span><span>收发中</span></div>
+                </div>
+
+                <section class="viz-panel" aria-label="Signal Visualization">
+                    <div class="viz-header">
+                        <div>
+                            <div class="viz-title">可视化任务中心</div>
+                            <div class="viz-subtitle" id="viz-status-text">空闲中。下达可视化命令后，前端会自动弹出监视窗口。</div>
+                        </div>
+                        <div class="viz-actions">
+                            <button class="viz-open-btn" type="button" id="viz-open-btn" onclick="showVisualizationModal()">弹出窗口</button>
+                            <button class="viz-stop-btn" type="button" id="viz-stop-btn" onclick="stopHardwareTask()">停止任务</button>
+                        </div>
+                    </div>
+
+                    <div class="viz-metrics">
+                        <div class="viz-metric">
+                            <span>任务</span>
+                            <strong id="viz-task-name">--</strong>
+                        </div>
+                        <div class="viz-metric">
+                            <span>中心频率</span>
+                            <strong id="viz-center-freq">--</strong>
+                        </div>
+                        <div class="viz-metric">
+                            <span>Tone 频率</span>
+                            <strong id="viz-tone-freq">--</strong>
+                        </div>
+                        <div class="viz-metric">
+                            <span>采样率</span>
+                            <strong id="viz-sample-rate">--</strong>
+                        </div>
+                        <div class="viz-metric">
+                            <span>接收功率</span>
+                            <strong id="viz-rx-power">--</strong>
+                        </div>
+                        <div class="viz-metric">
+                            <span>峰值频点</span>
+                            <strong id="viz-peak-freq">--</strong>
+                        </div>
+                    </div>
+
+                    <div class="viz-window-note">
+                        波形和频谱图会优先显示在弹出的监视窗口中；如果需要，也可以从弹窗里再切换到独立浏览器窗口。
+                    </div>
+                </section>
+
+                <div id="cyber-popover" class="cyber-popover hidden" role="dialog" aria-modal="false" aria-hidden="true">
+                    <div class="popover-header">
+                        <span id="popover-title">USRP-01 DIAGNOSTICS</span>
+                        <button class="close-btn" type="button" onclick="closePopover()">×</button>
+                    </div>
+                    <div class="popover-body">
+                        <div class="data-group-title">RF &amp; Signal Parameters</div>
+                        <div class="data-row"><span class="label">Center Freq:</span><span class="value" id="popover-center-freq">...</span></div>
+                        <div class="data-row"><span class="label">Sample Rate:</span><span class="value" id="popover-sample-rate">...</span></div>
+                        <div class="data-row"><span class="label">Master Clock:</span><span class="value" id="popover-master-clock">...</span></div>
+                        <div class="data-row"><span class="label">Gain (Rx/Tx):</span><span class="value" id="popover-gain">...</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <div id="viz-modal" class="viz-modal hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="viz-modal-title">
+        <div class="viz-modal-backdrop" onclick="hideVisualizationModal()"></div>
+        <div class="viz-modal-panel">
+            <div class="viz-modal-header">
+                <div>
+                    <div class="viz-modal-kicker">Visualization Popup</div>
+                    <h2 id="viz-modal-title">SDR 可视化监视窗</h2>
+                    <p id="viz-modal-status">正在等待可视化任务启动。</p>
+                </div>
+                <div class="viz-modal-actions">
+                    <button class="viz-open-btn" type="button" onclick="openVisualizationWindow()">独立窗口</button>
+                    <button class="viz-stop-btn" type="button" id="viz-modal-stop-btn" onclick="stopHardwareTask()">停止任务</button>
+                    <button class="viz-modal-close" type="button" onclick="hideVisualizationModal()" aria-label="关闭可视化窗口">×</button>
+                </div>
+            </div>
+            <div class="viz-modal-body">
+                <iframe
+                    id="viz-modal-frame"
+                    class="viz-modal-frame"
+                    title="SDR 可视化窗口"
+                    loading="lazy"
+                ></iframe>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/app.js?v=22"></script>
+</body>
+</html>

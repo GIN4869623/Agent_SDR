@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SDR 可视化监视窗</title>
+    <link rel="stylesheet" href="css/visualization-window.css?v=4">
+</head>
+<body>
+    <main class="viz-shell">
+        <section class="viz-hero">
+            <div>
+                <div class="viz-kicker">Dedicated Window</div>
+                <h1>SDR 可视化监视窗</h1>
+                <p id="viz-status-text">空闲中。从主控台发起可视化任务后，波形和频谱会显示在这里。</p>
+            </div>
+            <div class="viz-toolbar">
+                <button type="button" class="viz-btn viz-btn-secondary" id="viz-refresh-btn">刷新状态</button>
+                <button type="button" class="viz-btn viz-btn-danger" id="viz-stop-btn">停止任务</button>
+            </div>
+        </section>
+
+        <section class="viz-summary">
+            <article class="viz-stat">
+                <span>任务</span>
+                <strong id="viz-task-name">--</strong>
+            </article>
+            <article class="viz-stat">
+                <span>中心频率</span>
+                <strong id="viz-center-freq">--</strong>
+            </article>
+            <article class="viz-stat">
+                <span>Tone 频率</span>
+                <strong id="viz-tone-freq">--</strong>
+            </article>
+            <article class="viz-stat">
+                <span>采样率</span>
+                <strong id="viz-sample-rate">--</strong>
+            </article>
+            <article class="viz-stat">
+                <span>接收功率</span>
+                <strong id="viz-rx-power">--</strong>
+            </article>
+            <article class="viz-stat">
+                <span>峰值频点</span>
+                <strong id="viz-peak-freq">--</strong>
+            </article>
+        </section>
+
+        <section class="viz-stage">
+            <article class="viz-card">
+                <div class="viz-card-header">
+                    <div>
+                        <h2>I / Q 波形</h2>
+                        <p>显示当前可视化任务输出的时域采样。</p>
+                    </div>
+                    <span class="viz-chip">时域</span>
+                </div>
+                <canvas id="iq-canvas" class="viz-canvas"></canvas>
+            </article>
+
+            <article class="viz-card">
+                <div class="viz-card-header">
+                    <div>
+                        <h2>FFT 频谱</h2>
+                        <p>显示后端最近一帧可视化数据的频域结果。</p>
+                    </div>
+                    <span class="viz-chip viz-chip-warm">频域</span>
+                </div>
+                <canvas id="fft-canvas" class="viz-canvas"></canvas>
+            </article>
+        </section>
+
+        <section class="viz-footnote">
+            只要后端持续通过可视化接口发布数据，这个监视窗就能复用来显示后续的 SDR 波形和频谱任务。
+        </section>
+    </main>
+
+    <script src="js/visualization-window.js?v=5"></script>
+</body>
+</html>
