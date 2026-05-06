@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pydantic import Field
 
-from hardware.sdr_controller import DEFAULT_CENTER_FREQ_HZ, DEFAULT_TONE_FREQ_HZ, SDRController
+from hardware.sdr_controller import (
+    DEFAULT_CENTER_FREQ_HZ,
+    DEFAULT_TEXT_PACKET_REPETITIONS,
+    DEFAULT_TONE_FREQ_HZ,
+    SDRController,
+)
 from tools import ToolInput, ToolSpec
 
 
@@ -15,6 +20,12 @@ class FskSendRequest(ToolInput):
     tx_gain: float = Field(default=20.0, description="发射增益，单位 dB。")
     rx_gain: float = Field(default=20.0, description="接收增益，单位 dB。")
     amp: float = Field(default=0.6, description="发送信号幅度，范围建议 0 到 1。")
+    packet_repetitions: int = Field(
+        default=DEFAULT_TEXT_PACKET_REPETITIONS,
+        ge=1,
+        le=8,
+        description="同一个 2-FSK 文本包重复发送次数，用于提高短包解码成功率。",
+    )
 
 
 class AdaptiveTransmitRequest(ToolInput):

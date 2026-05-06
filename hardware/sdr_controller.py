@@ -20,6 +20,10 @@ SYNC_WORD = b"\x2D\xD4"
 DEFAULT_CENTER_FREQ_HZ = 2.4e9
 DEFAULT_TONE_FREQ_HZ = 100e3
 DEFAULT_TONE_SAMPLE_RATE_HZ = 1e6
+DEFAULT_TEXT_PACKET_REPETITIONS = 3
+DEFAULT_TEXT_GUARD_INTERVAL_S = 0.02
+DEFAULT_TEXT_RX_LEAD_S = 0.15
+DEFAULT_TEXT_RX_TAIL_S = 0.8
 
 
 class SDRController:
@@ -432,6 +436,7 @@ class SDRController:
         tx_gain: float = 20.0,
         rx_gain: float = 20.0,
         amp: float = 0.6,
+        packet_repetitions: int = DEFAULT_TEXT_PACKET_REPETITIONS,
     ) -> dict[str, Any]:
         if error := self._ensure_available():
             return error
@@ -452,15 +457,23 @@ class SDRController:
                 modulation="2-FSK",
             )
 
-            sps = int(round(samp_rate / sym_rate))
+            packet_repetitions = max(1, min(int(packet_repetitions or 1), 8))
+            sps = max(2, int(round(samp_rate / sym_rate)))
             sym_rate_eff = samp_rate / max(sps, 1)
-            tx_iq = modulate_2fsk(
+            packet_iq = modulate_2fsk(
                 bytes_to_bits(build_packet(text)),
                 samp_rate=samp_rate,
                 sym_rate=sym_rate_eff,
                 f_dev=f_dev,
                 amp=amp,
             )
+            guard_samples = max(int(round(DEFAULT_TEXT_GUARD_INTERVAL_S * samp_rate)), sps * 8)
+            guard_iq = np.zeros(guard_samples, dtype=np.complex64)
+            tx_parts: list[np.ndarray] = [guard_iq]
+            for _ in range(packet_repetitions):
+                tx_parts.append(packet_iq)
+                tx_parts.append(guard_iq)
+            tx_iq = np.concatenate(tx_parts)
             tx_time = len(tx_iq) / float(samp_rate)
 
             self.usrp.set_tx_rate(samp_rate, 0)
@@ -477,7 +490,9 @@ class SDRController:
             rx_buffer = np.zeros((1, 8192), dtype=np.complex64)
             rx_metadata = uhd.types.RXMetadata()
             captured: list[np.ndarray] = []
-            receive_deadline = [time.time() + 0.05 + tx_time + 0.25]
+            rx_metadata_errors: list[str] = []
+            receive_started_at = time.time()
+            receive_deadline = [receive_started_at + DEFAULT_TEXT_RX_LEAD_S + tx_time + DEFAULT_TEXT_RX_TAIL_S]
 
             def rx_worker() -> None:
                 cmd = uhd.types.StreamCMD(uhd.types.StreamMode.start_cont)
@@ -497,6 +512,7 @@ class SDRController:
                             captured.append(rx_buffer[0, :received].copy())
                             continue
                         if error_code not in {None, timeout_code, none_code}:
+                            rx_metadata_errors.append(str(error_code))
                             stop_rx.set()
                 finally:
                     self._stop_rx_stream(rx_stream)
@@ -504,7 +520,7 @@ class SDRController:
             rx_thread = threading.Thread(target=rx_worker, name="sdr-fsk-rx", daemon=True)
             self._set_hardware_runtime(tx_stream=tx_stream, rx_stream=rx_stream, rx_thread=rx_thread)
             rx_thread.start()
-            time.sleep(0.05)
+            time.sleep(DEFAULT_TEXT_RX_LEAD_S)
 
             tx_metadata = uhd.types.TXMetadata()
             tx_metadata.has_time_spec = False
@@ -512,16 +528,27 @@ class SDRController:
             tx_metadata.end_of_burst = False
 
             cursor = 0
+            tx_samples_sent = 0
+            tx_no_progress = 0
             tx_started_at = time.time()
             while cursor < len(tx_iq) and not self.bg_stop_event.is_set():
                 chunk = tx_iq[cursor : cursor + 4096]
-                if cursor + 4096 >= len(tx_iq):
-                    tx_metadata.end_of_burst = True
-                tx_stream.send(chunk, tx_metadata)
+                tx_metadata.end_of_burst = cursor + len(chunk) >= len(tx_iq)
+                sent = int(tx_stream.send(chunk, tx_metadata) or 0)
                 tx_metadata.start_of_burst = False
-                cursor += 4096
+                if sent <= 0:
+                    tx_no_progress += 1
+                    if tx_no_progress >= 5:
+                        break
+                    time.sleep(0.01)
+                    continue
+                tx_no_progress = 0
+                accepted = min(sent, len(chunk))
+                cursor += accepted
+                tx_samples_sent += accepted
 
-            receive_deadline[0] = max(receive_deadline[0], tx_started_at + tx_time + 0.25)
+            tx_finished_at = time.time()
+            receive_deadline[0] = max(receive_deadline[0], tx_finished_at + DEFAULT_TEXT_RX_TAIL_S)
             while (
                 time.time() < receive_deadline[0]
                 and not stop_rx.is_set()
@@ -540,7 +567,10 @@ class SDRController:
                     sent_text=text,
                     captured_samples=int(captured_iq.size),
                     center_freq_hz=float(center_freq_hz),
+                    tx_samples_requested=int(tx_iq.size),
+                    tx_samples_sent=int(tx_samples_sent),
                 )
+            rx_diagnostics = estimate_fsk_rx_diagnostics(captured_iq, samp_rate=float(samp_rate))
             decoded = (
                 decode_texts_from_iq(
                     captured_iq,
@@ -558,6 +588,14 @@ class SDRController:
                 decoded_ok=bool(decoded),
                 captured_samples=int(captured_iq.size),
                 center_freq_hz=float(center_freq_hz),
+                packet_repetitions=int(packet_repetitions),
+                tx_samples_requested=int(tx_iq.size),
+                tx_samples_sent=int(tx_samples_sent),
+                tx_complete=bool(tx_samples_sent >= int(tx_iq.size)),
+                tx_time_s=round(float(tx_finished_at - tx_started_at), 4),
+                receive_time_s=round(float(time.time() - receive_started_at), 4),
+                rx_metadata_errors=rx_metadata_errors[:5],
+                **rx_diagnostics,
             )
         finally:
             stop_rx.set()
@@ -1294,6 +1332,43 @@ def _dedupe_texts(texts: list[str]) -> list[str]:
         seen.add(text)
         unique.append(text)
     return unique
+
+
+def estimate_fsk_rx_diagnostics(iq: np.ndarray, samp_rate: float) -> dict[str, Any]:
+    iq = np.asarray(iq, dtype=np.complex64)
+    if iq.size == 0:
+        return {
+            "rx_power_db": None,
+            "rx_peak_power_db": None,
+            "fsk_freq_low_hz": None,
+            "fsk_freq_high_hz": None,
+            "fsk_freq_span_hz": None,
+        }
+
+    power = np.abs(iq) ** 2
+    rx_power_db = 10 * np.log10(float(np.mean(power)) + 1e-12)
+    rx_peak_power_db = 10 * np.log10(float(np.max(power)) + 1e-12)
+
+    freq = fsk_freq_discriminator(iq, samp_rate)
+    finite = freq[np.isfinite(freq)]
+    if finite.size == 0:
+        return {
+            "rx_power_db": round(float(rx_power_db), 2),
+            "rx_peak_power_db": round(float(rx_peak_power_db), 2),
+            "fsk_freq_low_hz": None,
+            "fsk_freq_high_hz": None,
+            "fsk_freq_span_hz": None,
+        }
+
+    low = float(np.percentile(finite, 10))
+    high = float(np.percentile(finite, 90))
+    return {
+        "rx_power_db": round(float(rx_power_db), 2),
+        "rx_peak_power_db": round(float(rx_peak_power_db), 2),
+        "fsk_freq_low_hz": round(low, 2),
+        "fsk_freq_high_hz": round(high, 2),
+        "fsk_freq_span_hz": round(high - low, 2),
+    }
 
 
 def decode_texts_from_iq(

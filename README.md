@@ -195,6 +195,7 @@ pip install -r requirements-optional.txt
 4. 启动服务：
 
 ```bash
+cd /home/njupt/Desktop/Agent_SDR && source .venv/bin/activate && python -c "import uhd; print('ok')"
 uvicorn main:app --reload
 ```
 

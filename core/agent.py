@@ -847,16 +847,36 @@ class SDRAgentService:
         captured = result.get("captured_samples", 0)
         decoded = result.get("decoded_texts") or []
         decoded_ok = bool(result.get("decoded_ok"))
+        repetitions = result.get("packet_repetitions", args.get("packet_repetitions", 3))
+        tx_requested = result.get("tx_samples_requested")
+        tx_sent = result.get("tx_samples_sent")
+        tx_complete = result.get("tx_complete", True)
+        rx_power = result.get("rx_power_db")
+        freq_span = result.get("fsk_freq_span_hz")
+        rx_errors = result.get("rx_metadata_errors") or []
 
         if decoded_ok:
             decoded_text = "、".join(str(item) for item in decoded)
             link_status = f"接收端成功解码，解码文本为 {decoded_text}。"
         else:
+            details: list[str] = []
+            if tx_requested is not None and tx_sent is not None and not tx_complete:
+                details.append(f"本次 TX 只送出 {tx_sent}/{tx_requested} 个样本，发送可能不完整")
+            if rx_power is not None:
+                details.append(f"接收平均功率约 {float(rx_power):.2f} dB")
+            if freq_span is not None:
+                details.append(f"FSK 频率判决跨度约 {float(freq_span):.0f} Hz")
+            if rx_errors:
+                details.append(f"RX metadata 异常为 {str(rx_errors[0])}")
+            diagnostic = "；".join(details)
             link_status = "接收端这次没有成功解码出文本，可能与回环路径、增益、同步或当前信道噪声有关。"
+            if diagnostic:
+                link_status += f"诊断信息显示：{diagnostic}。"
 
         return (
             f"文本链路已执行，发送内容是 {sent_text}。本次使用 2-FSK 调制，中心频率是 {center}，"
-            f"采样率是 {samp_rate}，符号率是 {sym_rate}，频偏是 {f_dev}，发射增益和接收增益分别是 {tx_gain} dB 和 {rx_gain} dB。"
+            f"采样率是 {samp_rate}，符号率是 {sym_rate}，频偏是 {f_dev}，同一文本包重复发送 {repetitions} 次，"
+            f"发射增益和接收增益分别是 {tx_gain} dB 和 {rx_gain} dB。"
             f"接收端捕获了 {captured} 个 IQ 样本。{link_status}"
         )
 
