@@ -99,11 +99,15 @@ _OPTIMAL_REQUEST_HINT = re.compile(
     re.I,
 )
 _ADAPTIVE_REQUEST_HINT = re.compile(
-    r"(自适应|adaptive|amc|自动选择|自动切换|调整调制|调制方式|信道质量|链路质量|按\s*snr|根据\s*snr|snr)",
+    r"(自适应|adaptive|amc|自动选择|自动切换|调整调制|信道质量|链路质量|按\s*snr|根据\s*snr|snr)",
+    re.I,
+)
+_FIXED_MODULATION_HINT = re.compile(
+    r"(2\s*[- ]?\s*fsk|fsk|bpsk|qpsk|16\s*[- ]?\s*qam|qam\s*16)",
     re.I,
 )
 _TEXT_TRANSMIT_HINT = re.compile(
-    r"(文本|消息|字符串|message|text|发送|发射|传输|收发|无线|发出去|fsk|发\s*(?=[A-Za-z0-9\"'“‘]))",
+    r"(文本|消息|字符串|message|text|发送|发射|传输|收发|无线|发出去|fsk|bpsk|qpsk|16\s*[- ]?\s*qam|发\s*(?=[A-Za-z0-9\"'“‘]))",
     re.I,
 )
 _CENTER_FREQ_HINT = re.compile(
@@ -339,6 +343,22 @@ class SDRAgentService:
                 low_freqs.append(freq_hz)
         return low_freqs[-1] if low_freqs else None
 
+    @staticmethod
+    def _extract_requested_modulation(instruction: str) -> str | None:
+        match = _FIXED_MODULATION_HINT.search(instruction)
+        if not match:
+            return None
+        compact = re.sub(r"[\s_-]+", "", match.group(1).upper())
+        if compact in {"FSK", "2FSK"}:
+            return "2-FSK"
+        if compact == "BPSK":
+            return "BPSK"
+        if compact == "QPSK":
+            return "QPSK"
+        if compact in {"16QAM", "QAM16"}:
+            return "16-QAM"
+        return None
+
     @classmethod
     def _apply_common_hardware_args(
         cls,
@@ -377,6 +397,9 @@ class SDRAgentService:
             tx_text = "" if wants_tone else cls._extract_text_payload(text)
             if tx_text:
                 args["text"] = tx_text
+                requested_modulation = cls._extract_requested_modulation(text)
+                if requested_modulation:
+                    args["modulation_scheme"] = requested_modulation
             if wants_tone or wants_visualization or not tx_text:
                 args["enable_tone"] = True
             if wants_adaptive:
@@ -395,6 +418,9 @@ class SDRAgentService:
 
         if wants_text_tx:
             args["text"] = cls._extract_text_payload(text) or text
+            requested_modulation = cls._extract_requested_modulation(text)
+            if requested_modulation:
+                args["modulation_scheme"] = requested_modulation
             return "text_fsk_send_and_receive", args
 
         return None
@@ -640,6 +666,20 @@ class SDRAgentService:
             elif tone_only_auto_task:
                 repaired["text"] = ""
 
+        if tool_name in {"text_fsk_send_and_receive", "auto_optimal_transmit"}:
+            repaired.pop("probe_text", None)
+            requested_modulation = cls._extract_requested_modulation(instruction)
+            for alias in ("modulation", "mod_scheme", "scheme", "mode"):
+                alias_value = repaired.pop(alias, None)
+                if requested_modulation or alias_value is None or repaired.get("modulation_scheme"):
+                    continue
+                requested_modulation = cls._extract_requested_modulation(str(alias_value))
+            if requested_modulation:
+                repaired["modulation_scheme"] = requested_modulation
+                notes.append(f"已按用户指令设置固定调制方式为 {requested_modulation}。")
+            elif not str(repaired.get("modulation_scheme") or "").strip():
+                repaired["modulation_scheme"] = "2-FSK"
+
         if tool_name in {"tone_loopback_visualize", "auto_optimal_transmit"}:
             parsed_center = cls._extract_center_freq_hz(instruction)
             parsed_tone = cls._extract_tone_freq_hz(instruction)
@@ -817,11 +857,11 @@ class SDRAgentService:
 
         selected = str(modulation or "").upper()
         if selected == "BPSK":
-            return f"探测 SNR 为 {snr:.2f} dB，低于 -18 dB 阈值，所以选择 BPSK，以优先保证鲁棒性。"
+            return f"探测 SNR 为 {snr:.2f} dB，低于 8 dB 升阶阈值或 probe 未通过校验，所以选择 BPSK，以优先保证鲁棒性。"
         if selected == "QPSK":
-            return f"探测 SNR 为 {snr:.2f} dB，处在 -18 dB 到 -15 dB 区间，所以选择 QPSK，在可靠性和速率之间折中。"
+            return f"探测 SNR 为 {snr:.2f} dB，且 probe 校验通过，处在 8 dB 到 16 dB 区间，所以选择 QPSK，在可靠性和速率之间折中。"
         if selected == "16-QAM":
-            return f"探测 SNR 为 {snr:.2f} dB，高于 -15 dB 阈值，所以选择 16-QAM，以利用较好的链路质量提高频谱效率。"
+            return f"探测 SNR 为 {snr:.2f} dB，且 probe 校验通过，高于 16 dB 阈值，所以选择 16-QAM，以利用较好的链路质量提高频谱效率。"
         return f"探测 SNR 为 {snr:.2f} dB，工具返回的调制方式是 {modulation}。"
 
     def _build_scan_reply(self, result: dict[str, Any], args: dict[str, Any]) -> str:
@@ -838,12 +878,13 @@ class SDRAgentService:
 
     def _build_text_fsk_reply(self, result: dict[str, Any], args: dict[str, Any]) -> str:
         sent_text = result.get("sent_text") or args.get("text") or ""
+        modulation = result.get("modulation_scheme") or result.get("tested_modulation") or args.get("modulation_scheme") or "2-FSK"
         center = self._format_hz(result.get("center_freq_hz", args.get("center_freq_hz", 2.4e9)))
-        samp_rate = self._format_hz(args.get("samp_rate", 1e6))
-        sym_rate = self._format_hz(args.get("sym_rate", 10e3))
+        samp_rate = self._format_hz(result.get("samp_rate", args.get("samp_rate", 1e6)))
+        sym_rate = self._format_hz(result.get("sym_rate", args.get("sym_rate", 10e3)))
         f_dev = self._format_hz(args.get("f_dev", 25e3))
-        tx_gain = args.get("tx_gain", 20.0)
-        rx_gain = args.get("rx_gain", 20.0)
+        tx_gain = result.get("tx_gain", args.get("tx_gain", 20.0))
+        rx_gain = result.get("rx_gain", args.get("rx_gain", 20.0))
         captured = result.get("captured_samples", 0)
         decoded = result.get("decoded_texts") or []
         decoded_ok = bool(result.get("decoded_ok"))
@@ -866,6 +907,8 @@ class SDRAgentService:
                 details.append(f"接收平均功率约 {float(rx_power):.2f} dB")
             if freq_span is not None:
                 details.append(f"FSK 频率判决跨度约 {float(freq_span):.0f} Hz")
+            if result.get("estimated_snr_db") is not None:
+                details.append(f"估计 SNR 为 {self._format_db(result.get('estimated_snr_db'))}")
             if rx_errors:
                 details.append(f"RX metadata 异常为 {str(rx_errors[0])}")
             diagnostic = "；".join(details)
@@ -873,9 +916,10 @@ class SDRAgentService:
             if diagnostic:
                 link_status += f"诊断信息显示：{diagnostic}。"
 
+        fsk_note = f"，频偏是 {f_dev}" if str(modulation).upper() in {"2-FSK", "FSK"} else ""
         return (
-            f"文本链路已执行，发送内容是 {sent_text}。本次使用 2-FSK 调制，中心频率是 {center}，"
-            f"采样率是 {samp_rate}，符号率是 {sym_rate}，频偏是 {f_dev}，同一文本包重复发送 {repetitions} 次，"
+            f"文本链路已执行，发送内容是 {sent_text}。本次使用 {modulation} 固定调制，中心频率是 {center}，"
+            f"采样率是 {samp_rate}，符号率是 {sym_rate}{fsk_note}，同一文本包重复发送 {repetitions} 次，"
             f"发射增益和接收增益分别是 {tx_gain} dB 和 {rx_gain} dB。"
             f"接收端捕获了 {captured} 个 IQ 样本。{link_status}"
         )
@@ -886,15 +930,27 @@ class SDRAgentService:
         snr = result.get("probe_snr_db")
         text = args.get("text") or ""
         reason = self._modulation_reason(selected, snr)
+        selection_guard = result.get("selection_guard")
         final_result = result.get("final_result") if isinstance(result.get("final_result"), dict) else {}
         final_snr = final_result.get("estimated_snr_db")
         final_note = ""
         if final_snr is not None:
             final_note = f"正式发送阶段估计 SNR 为 {self._format_db(final_snr)}。"
+        decoded = final_result.get("decoded_texts") or []
+        decoded_ok = bool(final_result.get("decoded_ok"))
+        captured = final_result.get("captured_samples", 0)
+        if decoded_ok:
+            decoded_text = "、".join(str(item) for item in decoded)
+            decode_note = f"接收端已按 {selected} 解调并通过 CRC 校验，解码文本为 {decoded_text}。"
+        else:
+            decode_note = (
+                f"接收端已尝试按 {selected} 解调，但这次没有通过同步/CRC 恢复出文本；"
+                f"捕获 IQ 样本数为 {captured}，可继续检查回环路径、增益、频偏和同步质量。"
+            )
         return (
-            f"自适应调制发送已完成，发送内容是 {text}，中心频率是 {center}。"
+            f"自适应调制收发已完成，发送内容是 {text}，中心频率是 {center}。"
             f"系统先用 BPSK 探测链路质量，然后选择 {selected} 作为正式发送调制方式。"
-            f"{reason}{final_note}"
+            f"{reason}{selection_guard or ''}{final_note}{decode_note}"
         )
 
     def _build_auto_optimal_reply(self, result: dict[str, Any], args: dict[str, Any]) -> str:
@@ -1277,6 +1333,13 @@ class SDRAgentService:
                     for tool_call in tool_calls:
                         fn = tool_call.get("function") or {}
                         tool_name = fn.get("name") or ""
+                        requested_modulation = self._extract_requested_modulation(instruction)
+                        if (
+                            tool_name == "adaptive_modulation_transmit"
+                            and requested_modulation
+                            and not _ADAPTIVE_REQUEST_HINT.search(instruction)
+                        ):
+                            tool_name = "text_fsk_send_and_receive"
                         tool_spec = self.tool_registry.get_tool(tool_name)
                         expected_category = (
                             HARDWARE_TOOL_CATEGORY

@@ -21,10 +21,10 @@ def build_system_prompt() -> str:
 4. 读取工具结果后，用简洁中文反馈，不重复大段原始 JSON。
 [Tools Logic]
 1. `perform_physical_scan`：扫描中心频率附近的接收功率或底噪。
-2. `text_fsk_send_and_receive`：执行普通文本的 2-FSK 无线收发。
+2. `text_fsk_send_and_receive`：执行普通文本的固定调制无线收发。用户未指定调制方式时使用 2-FSK；用户明确指定 BPSK、QPSK 或 16-QAM 时使用该固定调制，不要误用自适应工具。
 3. `tone_loopback_visualize`：启动持续 Tone/正弦波/单音，并把波形和频谱更新到独立可视化窗口。用户没有给参数时，必须按中心频率 2.4 GHz、基带 Tone 100 kHz 执行。
 4. `stop_hardware_task`：停止当前后台硬件任务并释放硬件。
-5. `adaptive_modulation_transmit`：先探测链路，再按 SNR 自动选择 BPSK / QPSK / 16-QAM。
+5. `adaptive_modulation_transmit`：仅在用户明确说自适应、自动选择、根据 SNR 或根据信道质量时使用；先探测链路，probe 校验通过后再按保守 SNR 阈值选择 BPSK / QPSK / 16-QAM，并按所选调制方式完成接收解调。
 6. `auto_optimal_transmit`：先寻找更干净的频点，再执行文本发送或 Tone；用户说“扫描后发正弦波/单音”或“找干净信道并可视化/显示框图/显示波形频谱”时使用它并设置 `enable_tone=true`。
 7. `search_sdr_knowledge`：查询本地 SDR 理论知识、实验说明和项目文档。
 [Response Style]

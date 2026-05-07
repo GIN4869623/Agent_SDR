@@ -24,6 +24,10 @@ DEFAULT_TEXT_PACKET_REPETITIONS = 3
 DEFAULT_TEXT_GUARD_INTERVAL_S = 0.02
 DEFAULT_TEXT_RX_LEAD_S = 0.15
 DEFAULT_TEXT_RX_TAIL_S = 0.8
+DEFAULT_AMC_SAMPLE_RATE_HZ = 10e6
+DEFAULT_AMC_SYMBOL_SPS = 10
+DEFAULT_AMC_PACKET_REPETITIONS = 3
+DEFAULT_AMC_GUARD_INTERVAL_S = 0.002
 
 
 class SDRController:
@@ -429,6 +433,7 @@ class SDRController:
     def text_fsk_send_and_receive(
         self,
         text: str,
+        modulation_scheme: str = "2-FSK",
         center_freq_hz: float = 2.4e9,
         samp_rate: float = 1e6,
         sym_rate: float = 10e3,
@@ -449,6 +454,33 @@ class SDRController:
         rx_thread: threading.Thread | None = None
         stop_rx = threading.Event()
         try:
+            try:
+                modulation_scheme = normalize_text_modulation_scheme(modulation_scheme)
+            except ValueError as exc:
+                return self._error(str(exc))
+            if modulation_scheme != "2-FSK":
+                result = self._run_modulation_once(
+                    text=text,
+                    center_freq_hz=center_freq_hz,
+                    mod_scheme=modulation_scheme,
+                    samp_rate=samp_rate,
+                    tx_gain=tx_gain,
+                    rx_gain=rx_gain,
+                    amp=amp,
+                    packet_repetitions=packet_repetitions,
+                    state_label="Fixed",
+                )
+                if result.get("status") == "success":
+                    result["message"] = "固定调制文本链路执行完成。"
+                    result["modulation_scheme"] = modulation_scheme
+                    result["sym_rate"] = float(samp_rate) / max(
+                        int(result.get("samples_per_symbol") or DEFAULT_AMC_SYMBOL_SPS),
+                        1,
+                    )
+                    result["tx_gain"] = float(tx_gain)
+                    result["rx_gain"] = float(rx_gain)
+                return result
+
             self._set_state(
                 "active",
                 f"{center_freq_hz / 1e9:.3f} GHz (FSK)",
@@ -584,6 +616,7 @@ class SDRController:
             return self._success(
                 "文本链路执行完成。",
                 sent_text=text,
+                modulation_scheme="2-FSK",
                 decoded_texts=decoded,
                 decoded_ok=bool(decoded),
                 captured_samples=int(captured_iq.size),
@@ -632,7 +665,17 @@ class SDRController:
                 return probe_result
 
             estimated_snr_db = float(probe_result["estimated_snr_db"])
-            selected_modulation = self._decide_modulation_by_snr(estimated_snr_db)
+            probe_decoded_ok = bool(probe_result.get("decoded_ok"))
+            selected_modulation = (
+                self._decide_modulation_by_snr(estimated_snr_db)
+                if probe_decoded_ok
+                else "BPSK"
+            )
+            selection_guard = (
+                "probe 包已通过 BPSK 解调和 CRC 校验，允许按 SNR 升阶。"
+                if probe_decoded_ok
+                else "probe 包未通过 BPSK 解调/CRC 校验，保守锁定 BPSK。"
+            )
             final_result = self._run_modulation_once(
                 text=text,
                 center_freq_hz=center_freq_hz,
@@ -644,10 +687,12 @@ class SDRController:
                 return final_result
 
             return self._success(
-                f"已根据链路质量自动选择 {selected_modulation} 完成发送。",
+                f"已根据链路质量自动选择 {selected_modulation} 完成发送，并按该调制方式完成接收解调。",
                 center_freq_hz=float(center_freq_hz),
                 probe_snr_db=round(estimated_snr_db, 2),
                 selected_modulation=selected_modulation,
+                probe_decoded_ok=probe_decoded_ok,
+                selection_guard=selection_guard,
                 probe_result=probe_result,
                 final_result=final_result,
             )
@@ -926,6 +971,7 @@ class SDRController:
     def auto_optimal_transmit(
         self,
         text: str = "",
+        modulation_scheme: str = "2-FSK",
         center_freq_hz: float = 2.4e9,
         search_span_hz: float = 30e6,
         enable_tone: bool = False,
@@ -1015,6 +1061,7 @@ class SDRController:
             else:
                 result["tx_result"] = self.text_fsk_send_and_receive(
                     text=text,
+                    modulation_scheme=modulation_scheme,
                     center_freq_hz=best_freq,
                 )
 
@@ -1027,42 +1074,23 @@ class SDRController:
         return result
 
     def _decide_modulation_by_snr(self, snr_db: float) -> str:
-        if snr_db < -18:
+        if snr_db < 8:
             return "BPSK"
-        if snr_db < -15:
+        if snr_db < 16:
             return "QPSK"
         return "16-QAM"
-
-    def _map_to_symbols(self, text: str, mod_scheme: str) -> np.ndarray:
-        bits = np.unpackbits(np.frombuffer(text.encode("utf-8"), dtype=np.uint8))
-        if mod_scheme == "BPSK":
-            symbols = (bits * 2 - 1).astype(np.complex64)
-        elif mod_scheme == "QPSK":
-            if len(bits) % 2 != 0:
-                bits = np.append(bits, 0)
-            sym_i = bits[0::2] * 2 - 1
-            sym_q = bits[1::2] * 2 - 1
-            symbols = (sym_i + 1j * sym_q) / np.sqrt(2)
-        elif mod_scheme == "16-QAM":
-            if len(bits) % 4 != 0:
-                bits = np.append(bits, np.zeros(4 - len(bits) % 4, dtype=np.uint8))
-            mapping = {(0, 0): -3, (0, 1): -1, (1, 1): 1, (1, 0): 3}
-            values = []
-            for idx in range(0, len(bits), 4):
-                i_val = mapping[tuple(bits[idx : idx + 2])]
-                q_val = mapping[tuple(bits[idx + 2 : idx + 4])]
-                values.append((i_val + 1j * q_val) / np.sqrt(10))
-            symbols = np.array(values, dtype=np.complex64)
-        else:
-            raise ValueError(f"不支持的调制方式: {mod_scheme}")
-        return symbols.astype(np.complex64)
 
     def _run_modulation_once(
         self,
         text: str,
         center_freq_hz: float,
         mod_scheme: str = "BPSK",
-        samp_rate: float = 10e6,
+        samp_rate: float = DEFAULT_AMC_SAMPLE_RATE_HZ,
+        tx_gain: float = 20.0,
+        rx_gain: float = 20.0,
+        amp: float = 0.5,
+        packet_repetitions: int = DEFAULT_AMC_PACKET_REPETITIONS,
+        state_label: str = "AMC",
     ) -> dict[str, Any]:
         tx_stream = None
         rx_stream = None
@@ -1071,22 +1099,31 @@ class SDRController:
         stop_rx = threading.Event()
         self._set_state(
             "active",
-            f"{center_freq_hz / 1e9:.3f} GHz (AMC)",
+            f"{center_freq_hz / 1e9:.3f} GHz ({state_label})",
             f"{samp_rate / 1e6:.1f} MS/s",
-            "20 / 20 dB",
+            f"{tx_gain:.0f} / {rx_gain:.0f} dB",
             modulation=mod_scheme,
         )
         try:
-            symbols = self._map_to_symbols(text, mod_scheme)
-            sps = 10
-            tx_iq = np.repeat(symbols, sps) * 0.5
+            sps = DEFAULT_AMC_SYMBOL_SPS
+            packet_repetitions = max(1, min(int(packet_repetitions or 1), 8))
+            symbols = map_bits_to_linear_symbols(bytes_to_bits(build_packet(text)), mod_scheme)
+            packet_iq = np.repeat(symbols, sps).astype(np.complex64) * float(amp)
+            guard_samples = max(int(round(DEFAULT_AMC_GUARD_INTERVAL_S * samp_rate)), sps * 16)
+            guard_iq = np.zeros(guard_samples, dtype=np.complex64)
+            tx_parts: list[np.ndarray] = [guard_iq]
+            for _ in range(packet_repetitions):
+                tx_parts.append(packet_iq)
+                tx_parts.append(guard_iq)
+            tx_iq = np.concatenate(tx_parts)
+            tx_time = len(tx_iq) / float(samp_rate)
 
             self.usrp.set_tx_freq(uhd.libpyuhd.types.tune_request(center_freq_hz), 0)
             self.usrp.set_tx_rate(samp_rate, 0)
-            self.usrp.set_tx_gain(20.0, 0)
+            self.usrp.set_tx_gain(tx_gain, 0)
             self.usrp.set_rx_freq(uhd.libpyuhd.types.tune_request(center_freq_hz), 0)
             self.usrp.set_rx_rate(samp_rate, 0)
-            self.usrp.set_rx_gain(20.0, 0)
+            self.usrp.set_rx_gain(rx_gain, 0)
 
             tx_stream = self.usrp.get_tx_stream(uhd.usrp.StreamArgs("fc32", "sc16"))
             rx_stream = self.usrp.get_rx_stream(uhd.usrp.StreamArgs("fc32", "sc16"))
@@ -1123,33 +1160,38 @@ class SDRController:
             metadata.end_of_burst = False
 
             chunk_size = 2048
+            tx_samples_sent = 0
             for idx in range(0, len(tx_iq), chunk_size):
                 if self.bg_stop_event.is_set():
                     break
                 chunk = tx_iq[idx : idx + chunk_size]
                 if idx + chunk_size >= len(tx_iq):
                     metadata.end_of_burst = True
-                tx_stream.send(chunk, metadata)
+                sent = int(tx_stream.send(chunk, metadata) or 0)
+                tx_samples_sent += max(0, min(sent, len(chunk)))
                 metadata.start_of_burst = False
 
             if not self.bg_stop_event.is_set():
-                time.sleep(0.1)
+                time.sleep(max(0.1, min(0.5, tx_time + 0.05)))
             stop_rx.set()
             self._stop_rx_stream(rx_stream)
             self._join_thread(thread, timeout=2.5)
 
+            rx_iq = np.concatenate(captured) if captured else np.array([], dtype=np.complex64)
             if self.bg_stop_event.is_set():
                 return self._success(
                     f"{mod_scheme} 测试已停止。",
                     stopped=True,
                     center_freq_hz=float(center_freq_hz),
                     tested_modulation=mod_scheme,
+                    captured_samples=int(rx_iq.size),
+                    tx_samples_requested=int(tx_iq.size),
+                    tx_samples_sent=int(tx_samples_sent),
                 )
 
-            if not captured:
+            if rx_iq.size == 0:
                 return self._error("未接收到回环信号。")
 
-            rx_iq = np.concatenate(captured)
             m2 = np.mean(np.abs(rx_iq) ** 2)
             m4 = np.mean(np.abs(rx_iq) ** 4)
             estimated_linear = max(
@@ -1160,13 +1202,31 @@ class SDRController:
                 1e-10,
             )
             snr_db = 10 * np.log10(estimated_linear + 1e-5)
-            snr_db = snr_db + np.random.uniform(-2, 2)
+            decoded = decode_linear_modulated_texts_from_iq(
+                rx_iq,
+                mod_scheme=mod_scheme,
+                sps=sps,
+            )
 
             return self._success(
                 f"{mod_scheme} 测试完成。",
                 center_freq_hz=float(center_freq_hz),
                 tested_modulation=mod_scheme,
+                modulation_scheme=mod_scheme,
                 estimated_snr_db=round(float(snr_db), 2),
+                sent_text=text,
+                decoded_texts=decoded,
+                decoded_ok=bool(decoded),
+                captured_samples=int(rx_iq.size),
+                packet_repetitions=int(packet_repetitions),
+                samp_rate=float(samp_rate),
+                sym_rate=float(samp_rate) / max(int(sps), 1),
+                tx_gain=float(tx_gain),
+                rx_gain=float(rx_gain),
+                tx_samples_requested=int(tx_iq.size),
+                tx_samples_sent=int(tx_samples_sent),
+                tx_complete=bool(tx_samples_sent >= int(tx_iq.size)),
+                samples_per_symbol=int(sps),
             )
         finally:
             stop_rx.set()
@@ -1198,6 +1258,185 @@ def build_packet(payload_text: str) -> bytes:
         + payload
         + (zlib.crc32(payload) & 0xFFFFFFFF).to_bytes(4, "big")
     )
+
+
+def normalize_text_modulation_scheme(modulation_scheme: str | None) -> str:
+    raw = str(modulation_scheme or "2-FSK").strip().upper().replace("_", "-")
+    compact = raw.replace(" ", "").replace("-", "")
+    if compact in {"", "2FSK", "FSK"}:
+        return "2-FSK"
+    if compact == "BPSK":
+        return "BPSK"
+    if compact == "QPSK":
+        return "QPSK"
+    if compact in {"16QAM", "QAM16"}:
+        return "16-QAM"
+    raise ValueError(f"不支持的文本调制方式: {modulation_scheme}")
+
+
+def map_bits_to_linear_symbols(bits: np.ndarray, mod_scheme: str) -> np.ndarray:
+    bits = np.asarray(bits, dtype=np.uint8)
+    scheme = mod_scheme.upper()
+    if scheme == "BPSK":
+        symbols = (bits.astype(np.int16) * 2 - 1).astype(np.float32)
+        return symbols.astype(np.complex64)
+
+    if scheme == "QPSK":
+        if len(bits) % 2 != 0:
+            bits = np.append(bits, 0)
+        bit_pairs = bits.reshape(-1, 2).astype(np.int16)
+        sym_i = bit_pairs[:, 0] * 2 - 1
+        sym_q = bit_pairs[:, 1] * 2 - 1
+        return ((sym_i + 1j * sym_q) / np.sqrt(2.0)).astype(np.complex64)
+
+    if scheme == "16-QAM":
+        if len(bits) % 4 != 0:
+            bits = np.append(bits, np.zeros(4 - len(bits) % 4, dtype=np.uint8))
+        mapping = {(0, 0): -3, (0, 1): -1, (1, 1): 1, (1, 0): 3}
+        values = []
+        for idx in range(0, len(bits), 4):
+            i_val = mapping[tuple(int(bit) for bit in bits[idx : idx + 2])]
+            q_val = mapping[tuple(int(bit) for bit in bits[idx + 2 : idx + 4])]
+            values.append((i_val + 1j * q_val) / np.sqrt(10.0))
+        return np.asarray(values, dtype=np.complex64)
+
+    raise ValueError(f"不支持的调制方式: {mod_scheme}")
+
+
+def _extract_active_iq_window(iq: np.ndarray, sps: int) -> np.ndarray:
+    iq = np.asarray(iq, dtype=np.complex64)
+    if iq.size == 0:
+        return iq
+
+    max_samples = 600_000
+    block = max(int(sps) * 8, 64)
+    n_blocks = iq.size // block
+    if n_blocks < 4:
+        return iq[:max_samples]
+
+    trimmed = iq[: n_blocks * block]
+    block_power = np.mean(np.abs(trimmed.reshape(n_blocks, block)) ** 2, axis=1)
+    finite = block_power[np.isfinite(block_power)]
+    if finite.size == 0:
+        return iq[:max_samples]
+
+    floor = float(np.median(finite))
+    peak = float(np.max(finite))
+    if peak <= floor * 1.5:
+        return iq[:max_samples]
+
+    threshold = max(floor * 4.0, peak * 0.08)
+    active = np.flatnonzero(block_power >= threshold)
+    if active.size == 0:
+        active = np.flatnonzero(block_power >= peak * 0.2)
+    if active.size == 0:
+        return iq[:max_samples]
+
+    margin_blocks = 6
+    start = max(0, int(active[0] - margin_blocks) * block)
+    end = min(iq.size, int(active[-1] + margin_blocks + 1) * block)
+    if end - start > max_samples:
+        end = start + max_samples
+    return iq[start:end]
+
+
+def _symbols_from_oversampled_iq(iq: np.ndarray, sps: int, offset: int) -> np.ndarray:
+    if offset >= len(iq):
+        return np.array([], dtype=np.complex64)
+    aligned = np.asarray(iq[offset:], dtype=np.complex64)
+    n_symbols = len(aligned) // sps
+    if n_symbols <= 0:
+        return np.array([], dtype=np.complex64)
+    symbols = aligned[: n_symbols * sps].reshape(n_symbols, sps).mean(axis=1)
+    if symbols.size > 50_000:
+        symbols = symbols[:50_000]
+    power = float(np.mean(np.abs(symbols) ** 2))
+    if not np.isfinite(power) or power <= 1e-12:
+        return np.array([], dtype=np.complex64)
+    return (symbols / np.sqrt(power)).astype(np.complex64)
+
+
+def _remove_guard_dc(iq: np.ndarray) -> np.ndarray:
+    iq = np.asarray(iq, dtype=np.complex64)
+    if iq.size == 0:
+        return iq
+    power = np.abs(iq) ** 2
+    finite_power = power[np.isfinite(power)]
+    if finite_power.size == 0:
+        return iq
+    threshold = float(np.percentile(finite_power, 20))
+    guard_like = iq[power <= threshold]
+    if guard_like.size >= max(16, iq.size // 20):
+        dc = np.mean(guard_like)
+        return (iq - dc).astype(np.complex64)
+    return iq
+
+
+def _demap_linear_symbols_to_bits(symbols: np.ndarray, mod_scheme: str) -> np.ndarray:
+    scheme = mod_scheme.upper()
+    symbols = np.asarray(symbols, dtype=np.complex64)
+    if scheme == "BPSK":
+        return (symbols.real > 0).astype(np.uint8)
+
+    if scheme == "QPSK":
+        bits = np.empty(symbols.size * 2, dtype=np.uint8)
+        bits[0::2] = (symbols.real > 0).astype(np.uint8)
+        bits[1::2] = (symbols.imag > 0).astype(np.uint8)
+        return bits
+
+    if scheme == "16-QAM":
+        threshold = 2.0 / np.sqrt(10.0)
+
+        def axis_bits(values: np.ndarray) -> np.ndarray:
+            out = np.empty((values.size, 2), dtype=np.uint8)
+            out[values < -threshold] = (0, 0)
+            out[(values >= -threshold) & (values < 0)] = (0, 1)
+            out[(values >= 0) & (values < threshold)] = (1, 1)
+            out[values >= threshold] = (1, 0)
+            return out
+
+        i_bits = axis_bits(symbols.real)
+        q_bits = axis_bits(symbols.imag)
+        bits = np.empty(symbols.size * 4, dtype=np.uint8)
+        bits[0::4] = i_bits[:, 0]
+        bits[1::4] = i_bits[:, 1]
+        bits[2::4] = q_bits[:, 0]
+        bits[3::4] = q_bits[:, 1]
+        return bits
+
+    raise ValueError(f"不支持的调制方式: {mod_scheme}")
+
+
+def decode_linear_modulated_texts_from_iq(
+    iq: np.ndarray,
+    mod_scheme: str,
+    sps: int,
+) -> list[str]:
+    iq = np.asarray(iq, dtype=np.complex64)
+    if iq.size == 0 or sps <= 0:
+        return []
+
+    window = _extract_active_iq_window(iq, sps=sps)
+    if window.size == 0:
+        return []
+    window = _remove_guard_dc(window)
+
+    scheme = mod_scheme.upper()
+    phase_steps = 32 if scheme == "BPSK" else 64
+    rotations = np.exp(-1j * np.linspace(0.0, 2.0 * np.pi, phase_steps, endpoint=False))
+
+    for offset in range(sps):
+        symbols = _symbols_from_oversampled_iq(window, sps=sps, offset=offset)
+        if symbols.size == 0:
+            continue
+        for use_conjugate in (False, True):
+            oriented = np.conj(symbols) if use_conjugate else symbols
+            for rotation in rotations:
+                bits = _demap_linear_symbols_to_bits(oriented * rotation, scheme)
+                texts = extract_all_packets_from_bits(bits)
+                if texts:
+                    return _dedupe_texts(texts)
+    return []
 
 
 def modulate_2fsk(
