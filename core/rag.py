@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import re
+import json
+import time
 from dataclasses import dataclass
-from pathlib import Path
 
-
-TOKEN_PATTERN = re.compile(r"[\u4e00-\u9fff]+|[A-Za-z0-9_.-]+")
+import requests
 
 
 @dataclass
@@ -15,81 +14,113 @@ class KnowledgeHit:
     score: float
 
 
+RETRIEVAL_PROMPT = """从知识库检索与以下查询相关的原文片段。
+
+查询：{query}
+
+严格只输出如下 JSON，禁止输出任何其他文字：
+
+{{"chunks": [{{"source": "文档名称", "content": "原文片段"}}]}}"""
+
+
 class LocalKnowledgeBase:
-    def __init__(self, root: Path) -> None:
-        self.root = Path(root)
-        self.documents = self._load_documents()
+    """Retrieve document chunks from Bailian knowledge base via Application API."""
+
+    def __init__(
+        self,
+        *,
+        app_id: str = "",
+        api_key: str = "",
+        endpoint: str = "https://dashscope.aliyuncs.com/api/v1/apps",
+        timeout: float = 30.0,
+    ) -> None:
+        self.app_id = app_id
+        self.api_key = api_key
+        self.endpoint = endpoint
+        self.timeout = timeout
+        self._available = bool(app_id and api_key)
 
     @property
     def document_count(self) -> int:
-        return len(self.documents)
+        return 1 if self._available else 0
 
-    def _load_documents(self) -> list[dict]:
-        docs: list[dict] = []
-        if not self.root.exists():
-            return docs
+    def query(self, prompt: str) -> str:
+        if not self._available:
+            return ""
 
-        for path in sorted(self.root.rglob("*")):
-            if not path.is_file():
-                continue
-            if path.suffix.lower() not in {".md", ".txt"}:
-                continue
+        retrieval_text = RETRIEVAL_PROMPT.format(query=prompt)
+
+        for attempt in range(3):
             try:
-                content = path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                content = path.read_text(encoding="utf-8", errors="ignore")
-            docs.append(
-                {
-                    "path": path.relative_to(self.root).as_posix(),
-                    "content": content.strip(),
-                    "tokens": self._tokenize(content),
-                }
-            )
-        return docs
-
-    def _tokenize(self, text: str) -> set[str]:
-        tokens: set[str] = set()
-        for raw in TOKEN_PATTERN.findall(text.lower()):
-            if any("\u4e00" <= ch <= "\u9fff" for ch in raw):
-                tokens.add(raw)
-                if len(raw) > 1:
-                    tokens.update(raw[idx : idx + 2] for idx in range(len(raw) - 1))
-            else:
-                tokens.add(raw)
-        return tokens
-
-    def search(self, query: str, top_k: int = 3) -> list[KnowledgeHit]:
-        query_tokens = self._tokenize(query)
-        if not query_tokens:
-            return []
-
-        hits: list[KnowledgeHit] = []
-        for doc in self.documents:
-            overlap = len(query_tokens & doc["tokens"])
-            if overlap == 0 and query.lower() not in doc["content"].lower():
-                continue
-
-            score = float(overlap)
-            if query.lower() in doc["content"].lower():
-                score += 2.0
-
-            hits.append(
-                KnowledgeHit(
-                    source=doc["path"],
-                    snippet=self._build_snippet(doc["content"], query),
-                    score=score,
+                resp = requests.post(
+                    f"{self.endpoint}/{self.app_id}/completion",
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"input": {"prompt": retrieval_text}},
+                    timeout=self.timeout,
                 )
-            )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    output = data.get("output") or {}
+                    text = output.get("text", "")
+                    if text:
+                        return self._extract_chunks(text, prompt)
+                    return ""
+            except Exception:
+                pass
+            if attempt < 2:
+                time.sleep(1.5)
+        return ""
 
-        hits.sort(key=lambda item: item.score, reverse=True)
-        return hits[:top_k]
+    def _extract_chunks(self, raw: str, query: str) -> str:
+        # 尝试解析 JSON
+        try:
+            parsed = json.loads(raw)
+            chunks = parsed.get("chunks", [])
+            if chunks:
+                lines = ["以下是知识库检索到的相关文档片段："]
+                for i, c in enumerate(chunks, 1):
+                    src = c.get("source", "未知来源")
+                    content = c.get("content", "")
+                    lines.append(f"{i}. [{src}] {content}")
+                return "\n".join(lines)
+        except (json.JSONDecodeError, TypeError):
+            pass
 
-    def _build_snippet(self, content: str, query: str) -> str:
-        compact = " ".join(content.split())
-        lowered = compact.lower()
-        idx = lowered.find(query.lower())
-        if idx == -1:
-            idx = 0
-        start = max(0, idx - 60)
-        end = min(len(compact), idx + 180)
-        return compact[start:end]
+        # 尝试提取 JSON 代码块
+        import re
+
+        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw)
+        if match:
+            try:
+                parsed = json.loads(match.group(1))
+                chunks = parsed.get("chunks", [])
+                if chunks:
+                    lines = ["以下是知识库检索到的相关文档片段："]
+                    for i, c in enumerate(chunks, 1):
+                        src = c.get("source", "未知来源")
+                        content = c.get("content", "")
+                        lines.append(f"{i}. [{src}] {content}")
+                    return "\n".join(lines)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Fallback: 直接返回原始文本（比完整回答开销小）
+        if len(raw) > 100:
+            return f"知识库检索结果：\n{raw}"
+
+        return ""
+
+    def search(self, query: str, top_k: int = 3) -> list[KnowledgeHit]:  # noqa: ARG002
+        text = self.query(query)
+        if text:
+            return [
+                KnowledgeHit(
+                    source="bailian_knowledge_base",
+                    snippet=text,
+                    score=1.0,
+                )
+            ]
+        return []

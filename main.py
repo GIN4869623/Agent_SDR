@@ -21,7 +21,10 @@ from tools.transmit_tools import build_transmit_tools
 
 
 memory = ConversationMemory(max_messages=settings.session_history_limit)
-knowledge_base = LocalKnowledgeBase(settings.knowledge_dir)
+knowledge_base = LocalKnowledgeBase(
+    app_id=settings.bailian_app_id,
+    api_key=settings.bailian_api_key,
+)
 controller = SDRController(settings.usrp_ip)
 tool_registry = ToolRegistry(
     [

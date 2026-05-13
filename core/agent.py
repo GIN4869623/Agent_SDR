@@ -4,6 +4,7 @@ import json
 import re
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Iterator, Literal
 
 try:
@@ -18,13 +19,42 @@ from tools import ToolRegistry
 
 
 RouteName = Literal["hardware", "knowledge", "chat"]
+HardwareTaskName = Literal[
+    "stop_hardware",
+    "rx_noise_scan",
+    "fixed_text_fsk",
+    "adaptive_text_transmit",
+    "tone_visualization",
+    "cognitive_text_transmit",
+    "cognitive_adaptive_text",
+    "cognitive_tone_visualization",
+]
+
+
+@dataclass(frozen=True)
+class HardwareTaskIntent:
+    task: HardwareTaskName
+    tool_name: str
+    args: dict[str, Any]
+    description: str
 
 HARDWARE_TOOL_CATEGORY = "hardware"
 KNOWLEDGE_TOOL_CATEGORY = "knowledge"
 KNOWLEDGE_TOOL_NAME = "search_sdr_knowledge"
 STOP_HARDWARE_TOOL_NAME = "stop_hardware_task"
 DEFAULT_CENTER_FREQ_HZ = 2.4e9
+DEFAULT_TEXT_MODULATION = "2-FSK"
 DEFAULT_TONE_FREQ_HZ = 100e3
+_HARDWARE_TASK_DESCRIPTIONS: dict[HardwareTaskName, str] = {
+    "stop_hardware": "停止当前占用 USRP 的后台物理层任务",
+    "rx_noise_scan": "接收端底噪/功率测量实验，只打开 RX 接收链路",
+    "fixed_text_fsk": "固定调制文本无线发送实验，默认调制为 2-FSK",
+    "adaptive_text_transmit": "先探测链路质量，再按 SNR 选择调制方式的文本发送实验",
+    "tone_visualization": "连续单音/正弦波发射与频谱可视化实验",
+    "cognitive_text_transmit": "先搜索较干净频点，再执行固定调制文本发送的认知无线实验，默认调制为 2-FSK",
+    "cognitive_adaptive_text": "先搜索较干净频点，再按链路质量自适应发送文本的认知无线实验",
+    "cognitive_tone_visualization": "先搜索较干净频点，再启动单音频谱观察的认知无线实验",
+}
 
 _TOOL_NAME_HINT = re.compile(
     r"(search_sdr_knowledge|tone_loopback|perform_physical|text_fsk|adaptive_modulation|"
@@ -92,22 +122,28 @@ _VISUALIZATION_REQUEST_HINT = re.compile(
     r"最优信道|最佳信道|干净频点|最优频点)",
     re.I,
 )
+_SIGNAL_VISUALIZATION_HINT = re.compile(
+    r"(可视化|可视化框|框图|图形|窗口|波形|频谱|监视|显示)",
+    re.I,
+)
 _STOP_REQUEST_HINT = re.compile(r"(停止|关闭|终止|释放|stop)", re.I)
 _SCAN_REQUEST_HINT = re.compile(r"(扫频|扫描|扫噪|扫.{0,4}频|底噪|噪声|测量|测试)", re.I)
 _OPTIMAL_REQUEST_HINT = re.compile(
-    r"(干净信道|最优信道|最佳信道|干净频点|最优频点|最佳频点|认知|找.{0,8}(干净|最优|最佳))",
+    r"(干净信道|干净频段|干净频带|最优信道|最佳信道|最优频段|最佳频段|干净频点|"
+    r"最优频点|最佳频点|认知|找.{0,12}(干净|最优|最佳)|"
+    r"(选择|挑选|寻找|搜索|切换到|切到).{0,12}(干净|最优|最佳).{0,8}(频段|频带|信道|频点|频率))",
     re.I,
 )
 _ADAPTIVE_REQUEST_HINT = re.compile(
     r"(自适应|adaptive|amc|自动选择|自动切换|调整调制|信道质量|链路质量|按\s*snr|根据\s*snr|snr)",
     re.I,
 )
-_FIXED_MODULATION_HINT = re.compile(
-    r"(2\s*[- ]?\s*fsk|fsk|bpsk|qpsk|16\s*[- ]?\s*qam|qam\s*16)",
+_DIRECT_MODULATION_HINT = re.compile(
+    r"(2\s*[- ]?\s*fsk|fsk|bpsk|qpsk|16\s*[- ]?\s*qam|16qam|qam16)",
     re.I,
 )
 _TEXT_TRANSMIT_HINT = re.compile(
-    r"(文本|消息|字符串|message|text|发送|发射|传输|收发|无线|发出去|fsk|bpsk|qpsk|16\s*[- ]?\s*qam|发\s*(?=[A-Za-z0-9\"'“‘]))",
+    r"(文本|消息|字符串|message|text|发送|发射|传输|收发|无线|发出去|fsk|发\s*(?=[A-Za-z0-9\"'“‘]))",
     re.I,
 )
 _CENTER_FREQ_HINT = re.compile(
@@ -344,13 +380,11 @@ class SDRAgentService:
         return low_freqs[-1] if low_freqs else None
 
     @staticmethod
-    def _extract_requested_modulation(instruction: str) -> str | None:
-        match = _FIXED_MODULATION_HINT.search(instruction)
-        if not match:
-            return None
-        compact = re.sub(r"[\s_-]+", "", match.group(1).upper())
-        if compact in {"FSK", "2FSK"}:
-            return "2-FSK"
+    def _normalize_requested_modulation(raw: Any) -> str | None:
+        normalized = str(raw or "").strip().upper()
+        compact = normalized.replace("_", "").replace("-", "").replace(" ", "")
+        if compact in {"", "FSK", "2FSK"}:
+            return DEFAULT_TEXT_MODULATION
         if compact == "BPSK":
             return "BPSK"
         if compact == "QPSK":
@@ -358,6 +392,13 @@ class SDRAgentService:
         if compact in {"16QAM", "QAM16"}:
             return "16-QAM"
         return None
+
+    @classmethod
+    def _extract_requested_modulation(cls, instruction: str) -> str | None:
+        match = _DIRECT_MODULATION_HINT.search(instruction)
+        if not match:
+            return None
+        return cls._normalize_requested_modulation(match.group(1))
 
     @classmethod
     def _apply_common_hardware_args(
@@ -376,7 +417,7 @@ class SDRAgentService:
         return patched
 
     @classmethod
-    def _infer_hardware_tool_call(cls, instruction: str) -> tuple[str, dict[str, Any]] | None:
+    def _classify_hardware_intent(cls, instruction: str) -> HardwareTaskIntent | None:
         text = instruction.strip()
         if not text:
             return None
@@ -384,12 +425,20 @@ class SDRAgentService:
         args = cls._apply_common_hardware_args(instruction=text, args={})
 
         if _STOP_REQUEST_HINT.search(text):
-            return STOP_HARDWARE_TOOL_NAME, {}
+            task: HardwareTaskName = "stop_hardware"
+            return HardwareTaskIntent(
+                task=task,
+                tool_name=STOP_HARDWARE_TOOL_NAME,
+                args={},
+                description=_HARDWARE_TASK_DESCRIPTIONS[task],
+            )
 
         wants_optimal = bool(_OPTIMAL_REQUEST_HINT.search(text))
         wants_tone = bool(_TONE_REQUEST_HINT.search(text))
         wants_visualization = bool(_VISUALIZATION_REQUEST_HINT.search(text))
-        wants_adaptive = bool(_ADAPTIVE_REQUEST_HINT.search(text))
+        wants_signal_visualization = bool(_SIGNAL_VISUALIZATION_HINT.search(text))
+        requested_modulation = cls._extract_requested_modulation(text)
+        wants_adaptive = bool(_ADAPTIVE_REQUEST_HINT.search(text)) and requested_modulation is None
         wants_text_tx = bool(_TEXT_TRANSMIT_HINT.search(text))
         wants_scan = bool(_SCAN_REQUEST_HINT.search(text))
 
@@ -397,33 +446,73 @@ class SDRAgentService:
             tx_text = "" if wants_tone else cls._extract_text_payload(text)
             if tx_text:
                 args["text"] = tx_text
-                requested_modulation = cls._extract_requested_modulation(text)
-                if requested_modulation:
-                    args["modulation_scheme"] = requested_modulation
-            if wants_tone or wants_visualization or not tx_text:
+            if wants_tone or wants_signal_visualization or not tx_text:
                 args["enable_tone"] = True
+            elif requested_modulation:
+                args["modulation"] = requested_modulation
             if wants_adaptive:
                 args["use_adaptive_modulation"] = True
-            return "auto_optimal_transmit", args
+            if wants_tone or wants_signal_visualization or not tx_text:
+                task = "cognitive_tone_visualization"
+            elif wants_adaptive:
+                task = "cognitive_adaptive_text"
+            else:
+                task = "cognitive_text_transmit"
+            return HardwareTaskIntent(
+                task=task,
+                tool_name="auto_optimal_transmit",
+                args=args,
+                description=_HARDWARE_TASK_DESCRIPTIONS[task],
+            )
 
         if wants_tone or wants_visualization:
-            return "tone_loopback_visualize", args
+            task = "tone_visualization"
+            return HardwareTaskIntent(
+                task=task,
+                tool_name="tone_loopback_visualize",
+                args=args,
+                description=_HARDWARE_TASK_DESCRIPTIONS[task],
+            )
 
         if wants_adaptive:
             args["text"] = cls._extract_text_payload(text) or "OpenClaw SDR adaptive test"
-            return "adaptive_modulation_transmit", args
+            task = "adaptive_text_transmit"
+            return HardwareTaskIntent(
+                task=task,
+                tool_name="adaptive_modulation_transmit",
+                args=args,
+                description=_HARDWARE_TASK_DESCRIPTIONS[task],
+            )
 
         if wants_scan:
-            return "perform_physical_scan", args
+            task = "rx_noise_scan"
+            return HardwareTaskIntent(
+                task=task,
+                tool_name="perform_physical_scan",
+                args=args,
+                description=_HARDWARE_TASK_DESCRIPTIONS[task],
+            )
 
         if wants_text_tx:
             args["text"] = cls._extract_text_payload(text) or text
-            requested_modulation = cls._extract_requested_modulation(text)
             if requested_modulation:
-                args["modulation_scheme"] = requested_modulation
-            return "text_fsk_send_and_receive", args
+                args["modulation"] = requested_modulation
+            task = "fixed_text_fsk"
+            return HardwareTaskIntent(
+                task=task,
+                tool_name="text_fsk_send_and_receive",
+                args=args,
+                description=_HARDWARE_TASK_DESCRIPTIONS[task],
+            )
 
         return None
+
+    @classmethod
+    def _infer_hardware_tool_call(cls, instruction: str) -> tuple[str, dict[str, Any]] | None:
+        intent = cls._classify_hardware_intent(instruction)
+        if intent is None:
+            return None
+        return intent.tool_name, dict(intent.args)
 
     @staticmethod
     def _route_note(route: RouteName) -> str:
@@ -630,6 +719,7 @@ class SDRAgentService:
     ) -> tuple[dict[str, Any], list[str]]:
         repaired = dict(args)
         notes: list[str] = []
+        explicit_fixed_modulation = False
 
         if tool_name == KNOWLEDGE_TOOL_NAME:
             query_value = str(repaired.get("query") or "").strip()
@@ -666,19 +756,27 @@ class SDRAgentService:
             elif tone_only_auto_task:
                 repaired["text"] = ""
 
-        if tool_name in {"text_fsk_send_and_receive", "auto_optimal_transmit"}:
-            repaired.pop("probe_text", None)
+        if tool_name in {"text_fsk_send_and_receive", "auto_optimal_transmit"} and not (
+            tool_name == "auto_optimal_transmit" and not str(repaired.get("text") or "").strip()
+        ):
             requested_modulation = cls._extract_requested_modulation(instruction)
-            for alias in ("modulation", "mod_scheme", "scheme", "mode"):
-                alias_value = repaired.pop(alias, None)
-                if requested_modulation or alias_value is None or repaired.get("modulation_scheme"):
-                    continue
-                requested_modulation = cls._extract_requested_modulation(str(alias_value))
-            if requested_modulation:
-                repaired["modulation_scheme"] = requested_modulation
-                notes.append(f"已按用户指令设置固定调制方式为 {requested_modulation}。")
-            elif not str(repaired.get("modulation_scheme") or "").strip():
-                repaired["modulation_scheme"] = "2-FSK"
+            raw_modulation = repaired.get("modulation")
+            normalized_modulation = cls._normalize_requested_modulation(raw_modulation)
+            explicit_fixed_modulation = requested_modulation is not None or (
+                raw_modulation not in {None, ""} and normalized_modulation is not None
+            )
+            if requested_modulation is not None:
+                repaired["modulation"] = requested_modulation
+                if normalized_modulation != requested_modulation:
+                    notes.append(f"已按用户指令补全固定调制方式为 `{requested_modulation}`。")
+            elif normalized_modulation is not None:
+                repaired["modulation"] = normalized_modulation
+            else:
+                repaired["modulation"] = DEFAULT_TEXT_MODULATION
+                if raw_modulation not in {None, ""}:
+                    notes.append("检测到无法识别的固定调制方式，已回退到默认文本调制 2-FSK。")
+                else:
+                    notes.append("未检测到固定调制方式，已使用默认文本调制 2-FSK。")
 
         if tool_name in {"tone_loopback_visualize", "auto_optimal_transmit"}:
             parsed_center = cls._extract_center_freq_hz(instruction)
@@ -710,6 +808,13 @@ class SDRAgentService:
             if not bool(repaired.get("enable_tone", False)):
                 repaired["enable_tone"] = True
                 notes.append("检测到认知选频可视化/Tone 意图，已补全 `enable_tone=true`。")
+        if (
+            tool_name == "auto_optimal_transmit"
+            and bool(repaired.get("use_adaptive_modulation"))
+            and explicit_fixed_modulation
+        ):
+            repaired["use_adaptive_modulation"] = False
+            notes.append("检测到用户明确指定了固定调制方式，已关闭按 SNR 自动选调制。")
 
         return repaired, notes
 
@@ -857,11 +962,11 @@ class SDRAgentService:
 
         selected = str(modulation or "").upper()
         if selected == "BPSK":
-            return f"探测 SNR 为 {snr:.2f} dB，低于 8 dB 升阶阈值或 probe 未通过校验，所以选择 BPSK，以优先保证鲁棒性。"
+            return f"探测 SNR 为 {snr:.2f} dB，低于 -18 dB 阈值，所以选择 BPSK，以优先保证鲁棒性。"
         if selected == "QPSK":
-            return f"探测 SNR 为 {snr:.2f} dB，且 probe 校验通过，处在 8 dB 到 16 dB 区间，所以选择 QPSK，在可靠性和速率之间折中。"
+            return f"探测 SNR 为 {snr:.2f} dB，处在 -18 dB 到 -15 dB 区间，所以选择 QPSK，在可靠性和速率之间折中。"
         if selected == "16-QAM":
-            return f"探测 SNR 为 {snr:.2f} dB，且 probe 校验通过，高于 16 dB 阈值，所以选择 16-QAM，以利用较好的链路质量提高频谱效率。"
+            return f"探测 SNR 为 {snr:.2f} dB，高于 -15 dB 阈值，所以选择 16-QAM，以利用较好的链路质量提高频谱效率。"
         return f"探测 SNR 为 {snr:.2f} dB，工具返回的调制方式是 {modulation}。"
 
     def _build_scan_reply(self, result: dict[str, Any], args: dict[str, Any]) -> str:
@@ -878,49 +983,39 @@ class SDRAgentService:
 
     def _build_text_fsk_reply(self, result: dict[str, Any], args: dict[str, Any]) -> str:
         sent_text = result.get("sent_text") or args.get("text") or ""
-        modulation = result.get("modulation_scheme") or result.get("tested_modulation") or args.get("modulation_scheme") or "2-FSK"
         center = self._format_hz(result.get("center_freq_hz", args.get("center_freq_hz", 2.4e9)))
-        samp_rate = self._format_hz(result.get("samp_rate", args.get("samp_rate", 1e6)))
-        sym_rate = self._format_hz(result.get("sym_rate", args.get("sym_rate", 10e3)))
+        modulation = result.get("selected_modulation") or args.get("modulation") or DEFAULT_TEXT_MODULATION
+        samp_rate = self._format_hz(args.get("samp_rate", 1e6))
+        sym_rate = self._format_hz(args.get("sym_rate", 10e3))
         f_dev = self._format_hz(args.get("f_dev", 25e3))
-        tx_gain = result.get("tx_gain", args.get("tx_gain", 20.0))
-        rx_gain = result.get("rx_gain", args.get("rx_gain", 20.0))
+        tx_gain = args.get("tx_gain", 20.0)
+        rx_gain = args.get("rx_gain", 20.0)
         captured = result.get("captured_samples", 0)
         decoded = result.get("decoded_texts") or []
         decoded_ok = bool(result.get("decoded_ok"))
-        repetitions = result.get("packet_repetitions", args.get("packet_repetitions", 3))
-        tx_requested = result.get("tx_samples_requested")
-        tx_sent = result.get("tx_samples_sent")
-        tx_complete = result.get("tx_complete", True)
-        rx_power = result.get("rx_power_db")
-        freq_span = result.get("fsk_freq_span_hz")
-        rx_errors = result.get("rx_metadata_errors") or []
+        decode_supported = bool(result.get("decode_supported", modulation == DEFAULT_TEXT_MODULATION))
+        estimated_snr = result.get("estimated_snr_db")
+
+        if str(modulation).upper() != DEFAULT_TEXT_MODULATION.upper():
+            snr_text = ""
+            if estimated_snr is not None:
+                snr_text = f" 当前回采链路估计 SNR 约为 {float(estimated_snr):.2f} dB。"
+            return (
+                f"文本链路已执行，发送内容是 {sent_text}。本次按你指定的 {modulation} 调制发送，中心频率是 {center}，"
+                f"采样率是 {samp_rate}，发射增益和接收增益分别是 {tx_gain} dB 和 {rx_gain} dB。"
+                f"接收端捕获了 {captured} 个 IQ 样本。"
+                f"{'当前固定调制路径已完成发射与回采，但还没有做文本级解码确认。' if not decode_supported else ''}{snr_text}"
+            )
 
         if decoded_ok:
             decoded_text = "、".join(str(item) for item in decoded)
             link_status = f"接收端成功解码，解码文本为 {decoded_text}。"
         else:
-            details: list[str] = []
-            if tx_requested is not None and tx_sent is not None and not tx_complete:
-                details.append(f"本次 TX 只送出 {tx_sent}/{tx_requested} 个样本，发送可能不完整")
-            if rx_power is not None:
-                details.append(f"接收平均功率约 {float(rx_power):.2f} dB")
-            if freq_span is not None:
-                details.append(f"FSK 频率判决跨度约 {float(freq_span):.0f} Hz")
-            if result.get("estimated_snr_db") is not None:
-                details.append(f"估计 SNR 为 {self._format_db(result.get('estimated_snr_db'))}")
-            if rx_errors:
-                details.append(f"RX metadata 异常为 {str(rx_errors[0])}")
-            diagnostic = "；".join(details)
             link_status = "接收端这次没有成功解码出文本，可能与回环路径、增益、同步或当前信道噪声有关。"
-            if diagnostic:
-                link_status += f"诊断信息显示：{diagnostic}。"
 
-        fsk_note = f"，频偏是 {f_dev}" if str(modulation).upper() in {"2-FSK", "FSK"} else ""
         return (
-            f"文本链路已执行，发送内容是 {sent_text}。本次使用 {modulation} 固定调制，中心频率是 {center}，"
-            f"采样率是 {samp_rate}，符号率是 {sym_rate}{fsk_note}，同一文本包重复发送 {repetitions} 次，"
-            f"发射增益和接收增益分别是 {tx_gain} dB 和 {rx_gain} dB。"
+            f"文本链路已执行，发送内容是 {sent_text}。本次使用 2-FSK 调制，中心频率是 {center}，"
+            f"采样率是 {samp_rate}，符号率是 {sym_rate}，频偏是 {f_dev}，发射增益和接收增益分别是 {tx_gain} dB 和 {rx_gain} dB。"
             f"接收端捕获了 {captured} 个 IQ 样本。{link_status}"
         )
 
@@ -930,27 +1025,15 @@ class SDRAgentService:
         snr = result.get("probe_snr_db")
         text = args.get("text") or ""
         reason = self._modulation_reason(selected, snr)
-        selection_guard = result.get("selection_guard")
         final_result = result.get("final_result") if isinstance(result.get("final_result"), dict) else {}
         final_snr = final_result.get("estimated_snr_db")
         final_note = ""
         if final_snr is not None:
             final_note = f"正式发送阶段估计 SNR 为 {self._format_db(final_snr)}。"
-        decoded = final_result.get("decoded_texts") or []
-        decoded_ok = bool(final_result.get("decoded_ok"))
-        captured = final_result.get("captured_samples", 0)
-        if decoded_ok:
-            decoded_text = "、".join(str(item) for item in decoded)
-            decode_note = f"接收端已按 {selected} 解调并通过 CRC 校验，解码文本为 {decoded_text}。"
-        else:
-            decode_note = (
-                f"接收端已尝试按 {selected} 解调，但这次没有通过同步/CRC 恢复出文本；"
-                f"捕获 IQ 样本数为 {captured}，可继续检查回环路径、增益、频偏和同步质量。"
-            )
         return (
-            f"自适应调制收发已完成，发送内容是 {text}，中心频率是 {center}。"
+            f"自适应调制发送已完成，发送内容是 {text}，中心频率是 {center}。"
             f"系统先用 BPSK 探测链路质量，然后选择 {selected} 作为正式发送调制方式。"
-            f"{reason}{selection_guard or ''}{final_note}{decode_note}"
+            f"{reason}{final_note}"
         )
 
     def _build_auto_optimal_reply(self, result: dict[str, Any], args: dict[str, Any]) -> str:
@@ -1098,6 +1181,7 @@ class SDRAgentService:
         route = self._resolve_route(instruction)
         if self._is_identity_query(instruction):
             route = "chat"
+        hardware_intent = self._classify_hardware_intent(instruction) if route == "hardware" else None
         active_model_name = self._resolve_active_model(route=route, requested_model=model_name)
 
         yield {
@@ -1161,6 +1245,10 @@ class SDRAgentService:
                     raise RuntimeError(f"当前路由 `{route}` 没有可用技能。")
 
                 executed_tool_count = 0
+                if hardware_intent is not None:
+                    intent_line = f"系统将本次请求理解为：{hardware_intent.description}。"
+                    exec_logs.append(intent_line)
+                    yield {"type": "tool_log", "line": intent_line}
 
                 for turn in range(self.settings.max_tool_turns):
                     tool_choice: str | dict[str, Any] = "required" if executed_tool_count == 0 else "auto"
@@ -1222,7 +1310,11 @@ class SDRAgentService:
                                 current_messages.pop()
                             inferred_tool_call = None
                             if route == "hardware":
-                                inferred_tool_call = self._infer_hardware_tool_call(instruction)
+                                inferred_tool_call = (
+                                    (hardware_intent.tool_name, dict(hardware_intent.args))
+                                    if hardware_intent is not None
+                                    else self._infer_hardware_tool_call(instruction)
+                                )
                             elif route == "knowledge":
                                 inferred_tool_call = (
                                     KNOWLEDGE_TOOL_NAME,
@@ -1268,6 +1360,7 @@ class SDRAgentService:
                                 timing["tool_calls"].append(
                                     {
                                         "name": tool_name,
+                                        "hardware_task": hardware_intent.task if hardware_intent else None,
                                         "duration_ms": tool_elapsed_ms,
                                         "status": result.get("status", "unknown"),
                                         "fallback_used": True,
@@ -1333,13 +1426,20 @@ class SDRAgentService:
                     for tool_call in tool_calls:
                         fn = tool_call.get("function") or {}
                         tool_name = fn.get("name") or ""
-                        requested_modulation = self._extract_requested_modulation(instruction)
+                        forced_by_intent = False
                         if (
-                            tool_name == "adaptive_modulation_transmit"
-                            and requested_modulation
-                            and not _ADAPTIVE_REQUEST_HINT.search(instruction)
+                            route == "hardware"
+                            and hardware_intent is not None
+                            and tool_name != hardware_intent.tool_name
                         ):
-                            tool_name = "text_fsk_send_and_receive"
+                            correction_line = (
+                                f"模型请求的技能 {tool_name or '(empty)'} 与物理实验意图不一致，"
+                                f"已改为 {hardware_intent.tool_name}。"
+                            )
+                            exec_logs.append(correction_line)
+                            yield {"type": "tool_log", "line": correction_line}
+                            tool_name = hardware_intent.tool_name
+                            forced_by_intent = True
                         tool_spec = self.tool_registry.get_tool(tool_name)
                         expected_category = (
                             HARDWARE_TOOL_CATEGORY
@@ -1374,10 +1474,13 @@ class SDRAgentService:
                                 }
                             )
                             continue
-                        try:
-                            args = json.loads(fn.get("arguments") or "{}")
-                        except json.JSONDecodeError:
-                            args = {}
+                        if forced_by_intent and hardware_intent is not None:
+                            args = dict(hardware_intent.args)
+                        else:
+                            try:
+                                args = json.loads(fn.get("arguments") or "{}")
+                            except json.JSONDecodeError:
+                                args = {}
 
                         args, repair_logs = self._repair_tool_args(
                             tool_name=tool_name,
@@ -1411,6 +1514,8 @@ class SDRAgentService:
                         timing["tool_calls"].append(
                             {
                                 "name": tool_name,
+                                "hardware_task": hardware_intent.task if hardware_intent else None,
+                                "intent_corrected": forced_by_intent,
                                 "duration_ms": tool_elapsed_ms,
                                 "status": result.get("status", "unknown"),
                                 "auto_stop_attempted": bool(
