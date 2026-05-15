@@ -10,7 +10,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config.settings import settings
-from core.agent import SDRAgentService
 from core.memory import ConversationMemory
 from core.rag import LocalKnowledgeBase
 from hardware.sdr_controller import SDRController
@@ -18,6 +17,8 @@ from tools import ToolRegistry
 from tools.knowledge_tools import build_knowledge_tools
 from tools.physical_tools import build_physical_tools
 from tools.transmit_tools import build_transmit_tools
+from graph.graph_service import GraphService
+from mcp_server.sdr_server import create_sdr_mcp_server
 
 
 memory = ConversationMemory(max_messages=settings.session_history_limit)
@@ -33,10 +34,11 @@ tool_registry = ToolRegistry(
         *build_knowledge_tools(knowledge_base),
     ]
 )
-agent = SDRAgentService(
+graph_service = GraphService(
     settings=settings,
     tool_registry=tool_registry,
     memory=memory,
+    knowledge_base=knowledge_base,
 )
 
 app = FastAPI(title=settings.app_name)
@@ -113,7 +115,7 @@ def reset_session(payload: ResetSessionRequest) -> dict:
 @app.post("/api/chat")
 def chat(payload: ChatRequest) -> dict:
     try:
-        return agent.chat(
+        return graph_service.chat(
             session_id=payload.session_id,
             instruction=payload.instruction,
             mode=payload.mode,
@@ -125,12 +127,12 @@ def chat(payload: ChatRequest) -> dict:
             "message": str(exc),
             "reply": "",
             "hardware_logs": [
-                "Agent processing failed. Check dependencies, model service, and UHD driver status."
+                "LangGraph agent processing failed."
             ],
             "updated_history": memory.get_history(payload.session_id),
-            "active_mode": agent.normalize_mode(payload.mode),
-            "active_model": agent.resolve_model_name(payload.mode),
-            "active_temperature": agent.resolve_temperature(payload.mode, payload.temperature),
+            "active_mode": graph_service.normalize_mode(payload.mode),
+            "active_model": graph_service.resolve_model_name(payload.mode),
+            "active_temperature": graph_service.resolve_temperature(payload.mode, payload.temperature),
         }
 
 
@@ -140,7 +142,7 @@ def chat_stream(payload: ChatRequest) -> StreamingResponse:
 
     def event_gen():
         try:
-            for event in agent.chat_stream(
+            for event in graph_service.chat_stream(
                 session_id=payload.session_id,
                 instruction=payload.instruction,
                 mode=payload.mode,
@@ -162,4 +164,12 @@ def chat_stream(payload: ChatRequest) -> StreamingResponse:
     )
 
 
+app.mount(
+    "/mcp",
+    create_sdr_mcp_server(
+        tool_registry=tool_registry,
+        knowledge_base=knowledge_base,
+        controller=controller,
+    ),
+)
 app.mount("/", StaticFiles(directory=str(settings.static_dir), html=True), name="web_root")
