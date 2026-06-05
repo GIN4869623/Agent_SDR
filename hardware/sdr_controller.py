@@ -493,7 +493,7 @@ class SDRController:
             sps = max(2, int(round(samp_rate / sym_rate)))
             sym_rate_eff = samp_rate / max(sps, 1)
             packet_iq = modulate_2fsk(
-                bytes_to_bits(build_packet(text)),
+                hamming_7_4_encode(bytes_to_bits(build_packet(text))),
                 samp_rate=samp_rate,
                 sym_rate=sym_rate_eff,
                 f_dev=f_dev,
@@ -603,7 +603,7 @@ class SDRController:
                     tx_samples_sent=int(tx_samples_sent),
                 )
             rx_diagnostics = estimate_fsk_rx_diagnostics(captured_iq, samp_rate=float(samp_rate))
-            decoded = (
+            decoded, decode_diag = (
                 decode_texts_from_iq(
                     captured_iq,
                     samp_rate=float(samp_rate),
@@ -611,7 +611,7 @@ class SDRController:
                     threshold_hz=0.0,
                 )
                 if captured
-                else []
+                else ([], {"failures": ["未捕获到任何IQ样本"]})
             )
             return self._success(
                 "文本链路执行完成。",
@@ -619,6 +619,7 @@ class SDRController:
                 modulation_scheme="2-FSK",
                 decoded_texts=decoded,
                 decoded_ok=bool(decoded),
+                decode_diagnostics=decode_diag,
                 captured_samples=int(captured_iq.size),
                 center_freq_hz=float(center_freq_hz),
                 packet_repetitions=int(packet_repetitions),
@@ -1107,7 +1108,7 @@ class SDRController:
         try:
             sps = DEFAULT_AMC_SYMBOL_SPS
             packet_repetitions = max(1, min(int(packet_repetitions or 1), 8))
-            symbols = map_bits_to_linear_symbols(bytes_to_bits(build_packet(text)), mod_scheme)
+            symbols = map_bits_to_linear_symbols(hamming_7_4_encode(bytes_to_bits(build_packet(text))), mod_scheme)
             packet_iq = np.repeat(symbols, sps).astype(np.complex64) * float(amp)
             guard_samples = max(int(round(DEFAULT_AMC_GUARD_INTERVAL_S * samp_rate)), sps * 16)
             guard_iq = np.zeros(guard_samples, dtype=np.complex64)
@@ -1202,7 +1203,7 @@ class SDRController:
                 1e-10,
             )
             snr_db = 10 * np.log10(estimated_linear + 1e-5)
-            decoded = decode_linear_modulated_texts_from_iq(
+            decoded, decode_diag = decode_linear_modulated_texts_from_iq(
                 rx_iq,
                 mod_scheme=mod_scheme,
                 sps=sps,
@@ -1217,6 +1218,7 @@ class SDRController:
                 sent_text=text,
                 decoded_texts=decoded,
                 decoded_ok=bool(decoded),
+                decode_diagnostics=decode_diag,
                 captured_samples=int(rx_iq.size),
                 packet_repetitions=int(packet_repetitions),
                 samp_rate=float(samp_rate),
@@ -1247,6 +1249,55 @@ def bits_to_bytes(bits: np.ndarray) -> bytes:
     if len(bits) % 8 != 0:
         bits = np.pad(bits, (0, 8 - (len(bits) % 8)), mode="constant")
     return np.packbits(bits, bitorder="big").tobytes()
+
+
+_H74_G = np.array([
+    [1, 0, 0, 0, 1, 1, 1],
+    [0, 1, 0, 0, 1, 1, 0],
+    [0, 0, 1, 0, 1, 0, 1],
+    [0, 0, 0, 1, 0, 1, 1],
+], dtype=np.uint8)
+
+_H74_H = np.array([
+    [1, 1, 1, 0, 1, 0, 0],
+    [1, 1, 0, 1, 0, 1, 0],
+    [1, 0, 1, 1, 0, 0, 1],
+], dtype=np.uint8)
+
+_H74_SYNDROME_MAP: dict[int, int] = {}
+for _col in range(7):
+    _syndrome = int(np.dot(_H74_H, [1 if j == _col else 0 for j in range(7)]) % 2 @ (1 << np.arange(3)))
+    _H74_SYNDROME_MAP[_syndrome] = _col
+
+
+def hamming_7_4_encode(bits: np.ndarray) -> np.ndarray:
+    bits = np.asarray(bits, dtype=np.uint8)
+    if bits.size == 0:
+        return bits
+    pad = (4 - (bits.size % 4)) % 4
+    if pad:
+        bits = np.pad(bits, (0, pad), mode="constant")
+    return ((bits.reshape(-1, 4) @ _H74_G) % 2).ravel()
+
+
+def hamming_7_4_decode(bits: np.ndarray) -> np.ndarray:
+    bits = np.asarray(bits, dtype=np.uint8)
+    if bits.size == 0:
+        return bits
+    pad = (7 - (bits.size % 7)) % 7
+    if pad:
+        bits = np.pad(bits, (0, pad), mode="constant")
+    codewords = bits.reshape(-1, 7)
+    syndromes = (codewords @ _H74_H.T) % 2
+    syndrome_int = np.dot(syndromes, 1 << np.arange(3))
+    corrected = codewords.copy()
+    for idx in range(len(corrected)):
+        si = int(syndrome_int[idx])
+        if si != 0:
+            col = _H74_SYNDROME_MAP.get(si)
+            if col is not None:
+                corrected[idx, col] ^= 1
+    return corrected[:, :4].ravel()
 
 
 def build_packet(payload_text: str) -> bytes:
@@ -1411,32 +1462,56 @@ def decode_linear_modulated_texts_from_iq(
     iq: np.ndarray,
     mod_scheme: str,
     sps: int,
-) -> list[str]:
+) -> tuple[list[str], dict[str, Any]]:
+    diag: dict[str, Any] = {
+        "samples": int(iq.size),
+        "sps": int(sps),
+        "mod_scheme": mod_scheme,
+        "failures": [],
+    }
     iq = np.asarray(iq, dtype=np.complex64)
     if iq.size == 0 or sps <= 0:
-        return []
+        diag["failures"].append(f"IQ样本为空或sps({sps})无效")
+        return [], diag
 
     window = _extract_active_iq_window(iq, sps=sps)
+    diag["window_samples"] = int(window.size)
     if window.size == 0:
-        return []
+        diag["failures"].append("未提取到活跃信号窗口(功率太低或无信号)")
+        return [], diag
     window = _remove_guard_dc(window)
+    diag["window_after_dc"] = int(window.size)
 
     scheme = mod_scheme.upper()
     phase_steps = 32 if scheme == "BPSK" else 64
+    diag["phase_steps"] = phase_steps
     rotations = np.exp(-1j * np.linspace(0.0, 2.0 * np.pi, phase_steps, endpoint=False))
 
+    diag["offsets_tried"] = 0
+    diag["combinations_tried"] = 0
     for offset in range(sps):
         symbols = _symbols_from_oversampled_iq(window, sps=sps, offset=offset)
         if symbols.size == 0:
             continue
+        diag["offsets_tried"] += 1
         for use_conjugate in (False, True):
             oriented = np.conj(symbols) if use_conjugate else symbols
             for rotation in rotations:
+                diag["combinations_tried"] += 1
                 bits = _demap_linear_symbols_to_bits(oriented * rotation, scheme)
-                texts = extract_all_packets_from_bits(bits)
-                if texts:
-                    return _dedupe_texts(texts)
-    return []
+                for cw_off in range(7):
+                    aligned = bits[cw_off:]
+                    if aligned.size < 7:
+                        continue
+                    corrected = hamming_7_4_decode(aligned)
+                    texts, pkt_errors = extract_all_packets_from_bits(corrected)
+                    if texts:
+                        return _dedupe_texts(texts), diag
+                    for err in pkt_errors:
+                        if err not in diag["failures"]:
+                            diag["failures"].append(err)
+    diag["failures"] = diag["failures"][:10]
+    return [], diag
 
 
 def modulate_2fsk(
@@ -1487,11 +1562,15 @@ def slicer_bits_from_symbol_freqs(
     return bits
 
 
-def extract_all_packets_from_bits(bitbuf: np.ndarray) -> list[str]:
+def extract_all_packets_from_bits(bitbuf: np.ndarray) -> tuple[list[str], list[str]]:
     texts: list[str] = []
+    errors: list[str] = []
     bitbuf = np.asarray(bitbuf, dtype=np.uint8)
+    attempts = 0
     while True:
         if len(bitbuf) < (len(SYNC_WORD) + 2 + 4) * 8:
+            if attempts == 0:
+                errors.append(f"比特缓冲区太小({len(bitbuf)}bit)，不足以容纳最小数据包")
             break
         found_any = False
         for bit_offset in range(8):
@@ -1505,22 +1584,37 @@ def extract_all_packets_from_bits(bitbuf: np.ndarray) -> list[str]:
             if len(data) < header_pos + 2:
                 continue
             payload_len = int.from_bytes(data[header_pos : header_pos + 2], "big")
+            if payload_len == 0 or payload_len > 4096:
+                errors.append(f"数据包长度异常({payload_len})，已跳过")
+                bitbuf = bitbuf[bit_offset + (idx + 1) * 8:]
+                found_any = True
+                break
             payload_pos = header_pos + 2
             crc_pos = payload_pos + payload_len
             end_pos = crc_pos + 4
             if end_pos > len(data):
-                continue
+                errors.append(f"数据包长度{payload_len}超出剩余数据({len(data) - header_pos - 2}字节可用)")
+                bitbuf = bitbuf[bit_offset + (idx + 1) * 8:]
+                found_any = True
+                break
             payload = data[payload_pos : payload_pos + payload_len]
             crc = int.from_bytes(data[crc_pos:end_pos], "big")
             if crc != (zlib.crc32(payload) & 0xFFFFFFFF):
-                continue
+                errors.append(f"CRC校验失败(计算值=0x{zlib.crc32(payload) & 0xFFFFFFFF:08X}, 期望值=0x{crc:08X})")
+                bitbuf = bitbuf[bit_offset + (idx + 1) * 8:]
+                found_any = True
+                break
             texts.append(payload.decode("utf-8", errors="replace"))
             bitbuf = bitbuf[bit_offset + end_pos * 8 :]
             found_any = True
             break
+        attempts += 1
         if not found_any:
+            if not errors:
+                data = bits_to_bytes(bitbuf)
+                errors.append(f"未在{len(data)}字节数据中找到同步字0x{SYNC_WORD.hex().upper()}")
             break
-    return texts
+    return texts, errors
 
 
 def _fsk_threshold_candidates(sym_freq: np.ndarray, fallback_hz: float) -> list[float]:
@@ -1615,24 +1709,48 @@ def decode_texts_from_iq(
     samp_rate: float,
     sym_rate: float,
     threshold_hz: float,
-) -> list[str]:
-    sps = int(round(samp_rate / sym_rate))
+) -> tuple[list[str], dict[str, Any]]:
+    diag: dict[str, Any] = {
+        "samples": int(iq.size),
+        "sps": int(round(samp_rate / sym_rate)),
+        "offsets_tried": 0,
+        "combinations_tried": 0,
+        "failures": [],
+    }
+    sps = diag["sps"]
     freq = fsk_freq_discriminator(iq, samp_rate)
+    diag["freq_samples"] = int(freq.size)
+    if freq.size == 0:
+        diag["failures"].append("IQ样本太少，无法进行频率鉴频")
+        return [], diag
+
     for sym_off in range(max(sps, 1)):
         offset_freq = freq[sym_off:]
         if len(offset_freq) < sps:
             continue
+        diag["offsets_tried"] += 1
         n_sym = len(offset_freq) // sps
         sym_freq = offset_freq[: n_sym * sps].reshape(n_sym, sps).mean(axis=1)
-        for candidate in _fsk_threshold_candidates(sym_freq, threshold_hz):
+        candidates = _fsk_threshold_candidates(sym_freq, threshold_hz)
+        for candidate in candidates:
             for invert in (False, True):
+                diag["combinations_tried"] += 1
                 bits = slicer_bits_from_symbol_freqs(sym_freq, candidate, invert=invert)
                 if len(bits) == 0:
                     continue
-                texts = extract_all_packets_from_bits(bits)
-                if texts:
-                    return _dedupe_texts(texts)
-    return []
+                for cw_off in range(7):
+                    aligned = bits[cw_off:]
+                    if aligned.size < 7:
+                        continue
+                    corrected = hamming_7_4_decode(aligned)
+                    texts, pkt_errors = extract_all_packets_from_bits(corrected)
+                    if texts:
+                        return _dedupe_texts(texts), diag
+                    for err in pkt_errors:
+                        if err not in diag["failures"]:
+                            diag["failures"].append(err)
+    diag["failures"] = diag["failures"][:10]
+    return [], diag
 
 
 def gen_complex_tone(tone_hz: float, samp_rate: float, n_samps: int, amp: float) -> np.ndarray:

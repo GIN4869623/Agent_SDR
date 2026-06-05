@@ -14,7 +14,8 @@ def build_system_prompt() -> str:
 5. 认知选频传输：自动扫描寻找干扰最小的频点，再在该频点执行文本收发或正弦波可视化。
 6. 硬件任务管理：停止正在后台运行的硬件任务，释放 USRP 设备。
 7. SDR 理论知识检索：查询知识库中的 SDR 理论、USRP 设备规格、实验操作文档和项目资料，并结合硬件执行结果给出诊断分析。
-8. 状态监控：实时查看 USRP 连接状态、当前调制方式、可视化窗口数据等。
+8. BPSK 视频流传输：启动或停止基于 GNU Radio + USRP 的 BPSK 视频流无线传输，在 VLC 播放器中显示接收画面。
+9. 状态监控：实时查看 USRP 连接状态、当前调制方式、可视化窗口数据和视频流运行状态。
 
 [Default Parameters]
 - 默认中心频率：2.4 GHz
@@ -48,7 +49,7 @@ def build_supervisor_system_prompt() -> str:
 6. 同一时间只调用一个工具。
 
 [Available Tools]
-- 硬件工具: perform_physical_scan, tone_loopback_visualize, stop_hardware_task, text_fsk_send_and_receive, adaptive_modulation_transmit, auto_optimal_transmit
+- 硬件工具: perform_physical_scan, tone_loopback_visualize, stop_hardware_task, text_fsk_send_and_receive, adaptive_modulation_transmit, auto_optimal_transmit, start_video_stream, stop_video_stream
 - 知识工具: consult_knowledge_agent
 
 [Constraints]

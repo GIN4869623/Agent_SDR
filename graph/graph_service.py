@@ -23,7 +23,7 @@ _HARDWARE_OBJECT_HINT = re.compile(
     r"(usrp|硬件|物理层|tone|回环|链路|波形|频谱|底噪|噪声|文本收发|文本发送|"
     r"正弦|正弦波|单音|连续波|信号|sine|sinusoid|fsk|bpsk|qpsk|16-qam|"
     r"频点|频率|频段|信道|干净信道|最优信道|干净频点|最优频点|增益|采样率|"
-    r"可视化|框图|无线|发出去)",
+    r"可视化|框图|无线|发出去|视频流|video.stream|video_stream|gnu.radio|vlc)",
     re.I,
 )
 _HARDWARE_EXECUTION_HINT = re.compile(
@@ -42,7 +42,7 @@ _EXPLANATION_HINT = re.compile(
 )
 _TOOL_NAME_HINT = re.compile(
     r"(search_sdr_knowledge|tone_loopback|perform_physical|text_fsk|adaptive_modulation|"
-    r"auto_optimal|stop_hardware)",
+    r"auto_optimal|stop_hardware|start_video_stream|stop_video_stream|video_stream)",
     re.I,
 )
 

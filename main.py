@@ -13,10 +13,12 @@ from config.settings import settings
 from core.memory import ConversationMemory
 from core.rag import LocalKnowledgeBase
 from hardware.sdr_controller import SDRController
+from hardware.video_stream_controller import VideoStreamController
 from tools import ToolRegistry
 from tools.knowledge_tools import build_knowledge_tools
 from tools.physical_tools import build_physical_tools
 from tools.transmit_tools import build_transmit_tools
+from tools.video_tools import build_video_tools
 from graph.graph_service import GraphService
 from mcp_server.sdr_server import create_sdr_mcp_server
 
@@ -27,11 +29,13 @@ knowledge_base = LocalKnowledgeBase(
     api_key=settings.bailian_api_key,
 )
 controller = SDRController(settings.usrp_ip)
+video_controller = VideoStreamController()
 tool_registry = ToolRegistry(
     [
         *build_physical_tools(controller),
         *build_transmit_tools(controller),
         *build_knowledge_tools(knowledge_base),
+        *build_video_tools(video_controller),
     ]
 )
 graph_service = GraphService(
@@ -92,6 +96,7 @@ def get_hardware_status() -> dict:
         "usrp_02_ip": "Offline",
         "diagnostics": controller.get_hardware_snapshot(),
         "visualization_active": controller.get_visualization_snapshot().get("active", False),
+        "video_stream": video_controller.get_state(),
         "knowledge_documents": knowledge_base.document_count,
     }
 
@@ -103,7 +108,12 @@ def get_visualization_state() -> dict:
 
 @app.post("/api/hardware/stop")
 def stop_hardware_task() -> dict:
-    return controller.stop_hardware_task()
+    video_result = video_controller.stop()
+    hw_result = controller.stop_hardware_task()
+    return {
+        "hardware": hw_result,
+        "video_stream": video_result,
+    }
 
 
 @app.post("/api/session/reset")
@@ -170,6 +180,7 @@ app.mount(
         tool_registry=tool_registry,
         knowledge_base=knowledge_base,
         controller=controller,
+        video_controller=video_controller,
     ),
 )
 app.mount("/", StaticFiles(directory=str(settings.static_dir), html=True), name="web_root")

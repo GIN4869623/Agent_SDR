@@ -101,6 +101,14 @@ def _regex_select_tool(instruction: str) -> tuple[str, dict[str, Any]]:
     """
     text_lower = instruction.lower()
 
+    # Video stream commands — check before generic stop/start patterns
+    if re.search(r'(视频流|video.stream|video_stream|gnu.radio.*视频|vlc)', text_lower):
+        if re.search(r'(停止|关闭|停掉|停下|stop)', text_lower):
+            return ("stop_video_stream", {})
+        if re.search(r'(状态|查询|status)', text_lower):
+            return ("video_stream_status", {})
+        return ("start_video_stream", {})
+
     if re.search(r'停止|关闭|停掉|停下', text_lower):
         return ("stop_hardware_task", {})
 
@@ -257,7 +265,8 @@ def create_supervisor_node(
                     "当前请求已被系统判定为硬件执行动作。你必须调用一个硬件工具来实际执行物理层操作，"
                     "不要仅用文字描述。可用的硬件工具: perform_physical_scan, tone_loopback_visualize, "
                     "stop_hardware_task, text_fsk_send_and_receive, adaptive_modulation_transmit, "
-                    "auto_optimal_transmit。如果需要分析执行结果或查询理论知识，调用 consult_knowledge_agent。"
+                    "auto_optimal_transmit, start_video_stream, stop_video_stream。"
+                    "如果需要分析执行结果或查询理论知识，调用 consult_knowledge_agent。"
                 )},
                 {"role": "user", "content": instruction},
             ]
@@ -277,6 +286,9 @@ def create_supervisor_node(
                     "text_fsk_send_and_receive",
                     "adaptive_modulation_transmit",
                     "auto_optimal_transmit",
+                    "start_video_stream",
+                    "stop_video_stream",
+                    "video_stream_status",
                 }
             ]
 

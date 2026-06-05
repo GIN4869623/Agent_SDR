@@ -15,6 +15,7 @@ from mcp.server.fastmcp import FastMCP
 
 from core.rag import LocalKnowledgeBase
 from hardware.sdr_controller import SDRController
+from hardware.video_stream_controller import VideoStreamController
 from tools import ToolRegistry
 
 
@@ -22,6 +23,7 @@ def create_sdr_mcp_server(
     tool_registry: ToolRegistry,
     knowledge_base: LocalKnowledgeBase,
     controller: SDRController,
+    video_controller: VideoStreamController | None = None,
 ) -> Any:
     """Build and return an ASGI app (FastMCP.sse_app) for FastAPI mounting."""
 
@@ -244,6 +246,38 @@ def create_sdr_mcp_server(
             "请根据刚才的硬件执行结果，分析信道质量（SNR、接收功率），"
             "判断当前调制方式是否合适，如果不合适请给出具体的参数调整建议。"
         )
+
+    # ── Video Stream Tools ─────────────────────────────────────────────
+
+    if video_controller is not None:
+
+        @mcp.tool(
+            name="start_video_stream",
+            description=(
+                "启动基于 GNU Radio + USRP 的 BPSK 视频流无线传输。"
+                "需要 GNU Radio 环境和图形显示器。"
+            ),
+        )
+        async def start_video_stream() -> str:
+            result = video_controller.start()
+            return json.dumps(result, ensure_ascii=False, indent=2)
+
+        @mcp.tool(
+            name="stop_video_stream",
+            description="停止 GNU Radio 视频流后台进程，并清理 VLC 播放器。",
+        )
+        async def stop_video_stream() -> str:
+            result = video_controller.stop()
+            return json.dumps(result, ensure_ascii=False, indent=2)
+
+        @mcp.resource(
+            uri="sdr://video/status",
+            name="Video Stream Status",
+            description="当前 BPSK 视频流传输状态。",
+        )
+        async def video_stream_status() -> str:
+            state = video_controller.get_state()
+            return json.dumps(state, ensure_ascii=False, indent=2)
 
     # ── Return ASGI app ─────────────────────────────────────────────────
     return mcp.sse_app()
