@@ -112,6 +112,24 @@ class SDRController:
             self.usrp = None
             self.hw_state["USRP-01"]["center"] = f"Connect failed: {exc}"
 
+    def disconnect_usrp(self) -> None:
+        """释放 USRP 设备的 UHD 句柄，使其他进程（如 GNU Radio 视频流）可以独占访问。"""
+        if self.usrp is not None:
+            self.usrp = None
+        self.hw_state["USRP-01"].update(
+            {
+                "status": "released",
+                "center": "Released for external process",
+                "sample": "Released",
+                "clock": "Released",
+                "gain": "Released",
+            }
+        )
+
+    def reconnect_usrp(self) -> None:
+        """重新打开 USRP 设备连接（外部进程释放后调用）。"""
+        self._connect()
+
     def get_hardware_snapshot(self) -> dict[str, dict[str, str]]:
         return deepcopy(self.hw_state)
 
@@ -376,7 +394,7 @@ class SDRController:
             stream_args.channels = [chan]
             rx_stream = self.usrp.get_rx_stream(stream_args)
             self._set_hardware_runtime(rx_stream=rx_stream)
-            duration_s = max(0.02, min(2.0, float(duration_s)))
+            duration_s = max(0.02, min(10.0, float(duration_s)))
             buffer = np.zeros((1, 4096), dtype=np.complex64)
             metadata = uhd.types.RXMetadata()
             captured: list[np.ndarray] = []

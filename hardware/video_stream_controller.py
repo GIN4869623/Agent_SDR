@@ -12,7 +12,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 GR_SCRIPT = "/home/njupt/Desktop/VIDEO/bpsk_video_stream.py"
 GR_PYTHON = "/usr/bin/python3"
@@ -56,8 +56,14 @@ class VideoStreamController:
     Python processes (CLI, FastAPI, MCP) see the same running task.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        release_cb: Callable[[], None] | None = None,
+        reconnect_cb: Callable[[], None] | None = None,
+    ) -> None:
         self._lock = threading.Lock()
+        self._release_cb = release_cb
+        self._reconnect_cb = reconnect_cb
 
     # ── public API ──────────────────────────────────────────────────────
 
@@ -91,6 +97,10 @@ class VideoStreamController:
 
             # Clean up leftover VLC processes
             _kill_vlc()
+
+            # ── 释放主进程持有的 USRP，让 GNU Radio 子进程可以独占访问 ──
+            if self._release_cb is not None:
+                self._release_cb()
 
             env = os.environ.copy()
             if "DISPLAY" not in env:
@@ -179,6 +189,10 @@ class VideoStreamController:
 
             _remove_pid_file()
             _kill_vlc()
+
+            # ── 视频流子进程已退出，重新连接 USRP ──
+            if self._reconnect_cb is not None:
+                self._reconnect_cb()
 
             return {
                 "status": "success",

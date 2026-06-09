@@ -7,6 +7,7 @@ from typing import Any
 from config.settings import Settings
 from graph.state import SDRState
 from prompts.system_prompts import build_supervisor_system_prompt
+from skill import SkillRegistry
 from tools import ToolRegistry
 
 
@@ -153,6 +154,7 @@ def create_supervisor_node(
     ollama_client: Any,
     tool_registry: ToolRegistry,
     settings: Settings,
+    skill_registry: SkillRegistry | None = None,
 ):
     hardware_tools = tool_registry.as_openai_tools(categories={"hardware"})
     all_tools = hardware_tools + [CONSULT_KNOWLEDGE_TOOL_DEF]
@@ -175,27 +177,28 @@ def create_supervisor_node(
         messages: list[dict[str, Any]],
         model: str,
         temperature: float,
+        tools: list[dict[str, Any]] | None = None,
         tool_choice: str = "auto",
     ) -> Any | None:
         """Call Ollama with tools. Returns response or None on failure."""
+        _tools = tools if tools is not None else all_tools
         try:
             return ollama_client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=temperature,
-                tools=all_tools,
+                tools=_tools,
                 tool_choice=tool_choice,
                 stream=False,
             )
         except Exception:
             if tool_choice != "auto":
-                # Retry with auto
                 try:
                     return ollama_client.chat.completions.create(
                         model=model,
                         messages=messages,
                         temperature=temperature,
-                        tools=all_tools,
+                        tools=_tools,
                         tool_choice="auto",
                         stream=False,
                     )
@@ -223,6 +226,116 @@ def create_supervisor_node(
                 "function": {"name": name, "arguments": arguments},
             })
         return result
+
+    # ── Skill-based routing helpers ──
+
+    # Pre-build per-skill tool definitions for single-tool LLM calls
+    _skill_tool_cache: dict[str, list[dict[str, Any]]] = {}
+
+    def _skill_to_openai_tool(skill_name: str) -> list[dict[str, Any]] | None:
+        """Get OpenAI tool definition for a single skill by name."""
+        if skill_name in _skill_tool_cache:
+            return _skill_tool_cache[skill_name]
+        tool_spec = tool_registry.get_tool(skill_name)
+        if tool_spec is None:
+            return None
+        tool_def = [tool_spec.as_openai_tool()]
+        _skill_tool_cache[skill_name] = tool_def
+        return tool_def
+
+    VALID_TOOL_NAMES = {
+        "consult_knowledge_agent",
+        "perform_physical_scan",
+        "tone_loopback_visualize",
+        "stop_hardware_task",
+        "text_fsk_send_and_receive",
+        "adaptive_modulation_transmit",
+        "auto_optimal_transmit",
+        "start_video_stream",
+        "stop_video_stream",
+        "video_stream_status",
+    }
+
+    def _try_skill_based_routing(
+        instruction: str,
+        api_messages: list[dict[str, Any]],
+        active_model: str,
+        temperature: float,
+    ) -> dict[str, Any] | None:
+        """Try skill-based routing: match skill via regex, inject prompt, call LLM with single tool.
+
+        Returns the assistant_dict on success, or None to fall back to full function calling.
+        """
+        if skill_registry is None:
+            return None
+
+        match_result = skill_registry.match_best(instruction, category="hardware", min_confidence=0.4)
+        if match_result is None:
+            return None
+
+        skill, confidence = match_result
+
+        # Video stream: detect sub-command for correct tool name
+        tool_name = skill.name
+        if skill.name == "start_video_stream":
+            text_lower = instruction.lower()
+            if re.search(r'(停止|关闭|停掉|停下|stop)', text_lower):
+                tool_name = "stop_video_stream"
+            elif re.search(r'(状态|查询|status)', text_lower):
+                tool_name = "video_stream_status"
+
+        # Get the single-tool definition for this skill
+        skill_tools = _skill_to_openai_tool(tool_name)
+        if skill_tools is None:
+            return None
+
+        # Build skill-enriched messages: supervisor prompt + skill prompt + user instruction
+        skill_messages = [
+            {"role": "system", "content": build_supervisor_system_prompt()},
+            {"role": "system", "content": (
+                f"当前请求已被系统判定为硬件执行动作。已通过意图匹配选择技能: {skill.name}。\n"
+                f"技能说明: {skill.description}\n"
+                f"技能指南:\n{skill.system_prompt}"
+            )},
+            {"role": "user", "content": instruction},
+        ]
+
+        # Call LLM with only the matched skill's tool definition
+        response = _call_ollama_with_tools(
+            skill_messages, active_model, temperature,
+            tools=skill_tools, tool_choice="required",
+        )
+
+        if response is None:
+            return None
+
+        tool_calls = _response_tool_calls(response)
+        valid_tool_calls = [
+            tc for tc in tool_calls
+            if tc.get("function", {}).get("name", "") in VALID_TOOL_NAMES
+        ]
+
+        if not valid_tool_calls:
+            # LLM didn't return valid tool call — fall back to regex
+            tool_name_regex, args = _regex_select_tool(instruction)
+            return _build_tool_call_dict(tool_name_regex, args, f"call_{tool_name_regex}")
+
+        # Override tool name if LLM picked a different (but valid) one
+        for tc in valid_tool_calls:
+            fn = tc["function"]
+            if fn["name"] == "consult_knowledge_agent":
+                continue
+            # Normalize: if skill matched text_fsk but LLM returned something else valid, keep LLM choice
+            if fn["name"] not in VALID_TOOL_NAMES - {"consult_knowledge_agent"}:
+                fn["name"] = tool_name
+
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": valid_tool_calls,
+        }
+
+    # ── main supervisor node ──
 
     def supervisor_node(state: SDRState) -> dict[str, Any]:
         iteration = state.get("iteration_count", 0)
@@ -253,12 +366,11 @@ def create_supervisor_node(
                 "iteration_count": iteration + 1,
             }
 
-        # === Hardware route (iteration 0): LLM tool calling ===
+        # === Hardware route (iteration 0): skill-based routing with LLM fallback ===
         if initial_route == "hardware" and iteration == 0:
             instruction = _extract_user_instruction(messages)
 
-            # Build messages in OLD proven format (plain dicts, not LangChain objects).
-            # Two system messages like old agent's _build_messages() + _route_note().
+            # Build messages in OLD proven format
             api_messages: list[dict[str, Any]] = [
                 {"role": "system", "content": build_supervisor_system_prompt()},
                 {"role": "system", "content": (
@@ -271,37 +383,30 @@ def create_supervisor_node(
                 {"role": "user", "content": instruction},
             ]
 
-            # Try LLM with tool_choice="required" (matching old agent's approach)
-            response = _call_ollama_with_tools(api_messages, active_model, temperature, "required")
-            tool_calls = _response_tool_calls(response) if response else []
+            # ── Try skill-based routing first ──
+            assistant_dict = _try_skill_based_routing(
+                instruction, api_messages, active_model, temperature,
+            )
 
-            # Validate tool calls have non-empty names
-            valid_tool_calls = [
-                tc for tc in tool_calls
-                if tc.get("function", {}).get("name", "") in {
-                    "consult_knowledge_agent",
-                    "perform_physical_scan",
-                    "tone_loopback_visualize",
-                    "stop_hardware_task",
-                    "text_fsk_send_and_receive",
-                    "adaptive_modulation_transmit",
-                    "auto_optimal_transmit",
-                    "start_video_stream",
-                    "stop_video_stream",
-                    "video_stream_status",
-                }
-            ]
+            if assistant_dict is None:
+                # ── Fallback: original LLM function calling with all tools ──
+                response = _call_ollama_with_tools(api_messages, active_model, temperature, tool_choice="required")
+                tool_calls = _response_tool_calls(response) if response else []
 
-            if not valid_tool_calls:
-                # LLM failed — fall back to regex
-                tool_name, args = _regex_select_tool(instruction)
-                assistant_dict = _build_tool_call_dict(tool_name, args, f"call_{tool_name}")
-            else:
-                assistant_dict = {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": valid_tool_calls,
-                }
+                valid_tool_calls = [
+                    tc for tc in tool_calls
+                    if tc.get("function", {}).get("name", "") in VALID_TOOL_NAMES
+                ]
+
+                if not valid_tool_calls:
+                    tool_name, args = _regex_select_tool(instruction)
+                    assistant_dict = _build_tool_call_dict(tool_name, args, f"call_{tool_name}")
+                else:
+                    assistant_dict = {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": valid_tool_calls,
+                    }
 
             tc_list = assistant_dict.get("tool_calls", [])
             tc_names = [tc.get("function", {}).get("name", "") for tc in tc_list]
@@ -314,7 +419,6 @@ def create_supervisor_node(
             }
 
         # === Subsequent iterations: LLM decides next step ===
-        # Convert state messages to plain dicts for Ollama
         api_messages: list[dict[str, Any]] = [
             {"role": "system", "content": build_supervisor_system_prompt()},
         ]

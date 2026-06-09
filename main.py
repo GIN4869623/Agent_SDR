@@ -21,6 +21,7 @@ from tools.transmit_tools import build_transmit_tools
 from tools.video_tools import build_video_tools
 from graph.graph_service import GraphService
 from mcp_server.sdr_server import create_sdr_mcp_server
+from skill.skills import build_all_skills
 
 
 memory = ConversationMemory(max_messages=settings.session_history_limit)
@@ -29,7 +30,10 @@ knowledge_base = LocalKnowledgeBase(
     api_key=settings.bailian_api_key,
 )
 controller = SDRController(settings.usrp_ip)
-video_controller = VideoStreamController()
+video_controller = VideoStreamController(
+    release_cb=controller.disconnect_usrp,
+    reconnect_cb=controller.reconnect_usrp,
+)
 tool_registry = ToolRegistry(
     [
         *build_physical_tools(controller),
@@ -38,11 +42,13 @@ tool_registry = ToolRegistry(
         *build_video_tools(video_controller),
     ]
 )
+skill_registry = build_all_skills(controller, video_controller, knowledge_base)
 graph_service = GraphService(
     settings=settings,
     tool_registry=tool_registry,
     memory=memory,
     knowledge_base=knowledge_base,
+    skill_registry=skill_registry,
 )
 
 app = FastAPI(title=settings.app_name)

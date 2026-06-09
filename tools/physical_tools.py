@@ -14,7 +14,7 @@ from tools import ToolInput, ToolSpec
 class ScanRequest(ToolInput):
     center_freq_hz: float = Field(default=DEFAULT_CENTER_FREQ_HZ, description="Center frequency in Hz.")
     bandwidth_hz: float = Field(default=1e6, description="Scan bandwidth in Hz.")
-    duration_s: float = Field(default=0.2, ge=0.02, le=2.0, description="接收采样持续时间，单位秒。")
+    duration_s: float = Field(default=0.2, ge=0.02, le=10.0, description="接收采样持续时间，单位秒。")
     chan: int = Field(default=0, description="Receive channel index.")
 
 

@@ -16,6 +16,7 @@ from graph.knowledge_node import create_knowledge_node
 from graph.state import SDRState, SDRGraphConfig
 from graph.supervisor_node import create_supervisor_node
 from prompts.system_prompts import build_system_prompt
+from skill import SkillRegistry
 from tools import ToolRegistry
 
 
@@ -107,6 +108,7 @@ class GraphService:
         tool_registry: ToolRegistry,
         memory: ConversationMemory,
         knowledge_base: LocalKnowledgeBase,
+        skill_registry: SkillRegistry | None = None,
     ) -> None:
         self.settings = settings
         self.tool_registry = tool_registry
@@ -123,7 +125,7 @@ class GraphService:
             self.ollama_client = None
 
         supervisor_node = create_supervisor_node(
-            self.ollama_client, tool_registry, settings,
+            self.ollama_client, tool_registry, settings, skill_registry,
         )
         hardware_node = create_hardware_node(tool_registry)
         knowledge_node = create_knowledge_node(
