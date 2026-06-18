@@ -210,3 +210,9 @@ http://127.0.0.1:8000
 1. `uhd` 一般不是通过 `pip` 安装，需要按 USRP/UHD 官方流程单独安装 Python 绑定。
 2. 当前 `core/rag.py` 是零额外依赖的本地检索实现，适合先跑通架构；后续可直接替换成 ChromaDB / FAISS。
 3. 当前 Agent 默认仍走 OpenAI 兼容接口，`OLLAMA_BASE_URL` 保持了你原项目的兼容模式。
+
+## 演示视频
+
+[查看视频 1](./15a9f62542c0ccde0243d3774e631b2b.mp4)
+
+[查看视频 2](./dbb3bbbb0396fc32b3b7eebeafd0ed33.mp4)
