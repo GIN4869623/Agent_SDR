@@ -125,6 +125,9 @@ class VideoStreamController:
                 )
             except Exception as exc:
                 log_fp.close()
+                # ── 启动失败，重新连接 USRP ──
+                if self._reconnect_cb is not None:
+                    self._reconnect_cb()
                 return {
                     "status": "error",
                     "error": f"无法启动 GNU Radio 视频流进程: {exc}",
@@ -140,6 +143,9 @@ class VideoStreamController:
                 exit_code = proc.returncode
                 error_msg = _read_log_tail()
                 _remove_pid_file()
+                # ── 进程异常退出，重新连接 USRP ──
+                if self._reconnect_cb is not None:
+                    self._reconnect_cb()
                 return {
                     "status": "error",
                     "error": (

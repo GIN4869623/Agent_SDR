@@ -27,7 +27,7 @@ openclaw_sdr_refactored/
 
 - `main.py`
   功能：FastAPI 入口，负责创建应用、注册路由、初始化 Agent、知识库、工具注册表和硬件控制器。
-  用法：项目启动时由 `uvicorn main:app --reload` 加载；如果要新增 HTTP API，一般从这里加路由。
+  用法：项目启动时由 `uvicorn main:app` 加载；如果要新增 HTTP API，一般从这里加路由。
 
 - `.env.example`
   功能：环境变量模板，集中放模型地址、API Key、USRP IP 等参数示例。
@@ -195,8 +195,9 @@ pip install -r requirements-optional.txt
 4. 启动服务：
 
 ```bash
-cd /home/njupt/Desktop/Agent_SDR && source .venv/bin/activate && python -c "import uhd; print('ok')"
-uvicorn main:app --reload
+cd ~/Desktop/Agent_SDR
+source .venv/bin/activate
+uvicorn main:app
 ```
 
 5. 浏览器访问：

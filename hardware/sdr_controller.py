@@ -46,7 +46,10 @@ class SDRController:
         self.usrp = None
         self.hw_state = self._build_default_state()
         self.visualization_state = self._build_default_visualization_state()
-        self._connect()
+        # 延迟连接：避免 uvicorn --reload 模式下 reloader 进程抢占 USRP
+        # 导致实际处理请求的 server 进程无法连接
+        if self.driver_available:
+            self._connect()
 
     def _build_default_state(self) -> dict[str, dict[str, str]]:
         return {
@@ -96,21 +99,30 @@ class SDRController:
             self.hw_state["USRP-01"]["clock"] = "Driver missing"
             return
 
-        try:
-            self.usrp = uhd.usrp.MultiUSRP(f"addr={self.ip}")
-            self.hw_state["USRP-01"].update(
-                {
-                    "status": "online",
-                    "center": "2.400 GHz (Idle)",
-                    "sample": "1.0 MS/s",
-                    "clock": "200 MHz",
-                    "gain": "20 / 20 dB",
-                    "modulation": "BPSK (Default)",
-                }
-            )
-        except Exception as exc:  # pragma: no cover
-            self.usrp = None
-            self.hw_state["USRP-01"]["center"] = f"Connect failed: {exc}"
+        last_error = ""
+        for retry in range(6):
+            try:
+                self.usrp = uhd.usrp.MultiUSRP(f"addr={self.ip}")
+                self.hw_state["USRP-01"].update(
+                    {
+                        "status": "online",
+                        "center": "2.400 GHz (Idle)",
+                        "sample": "1.0 MS/s",
+                        "clock": "200 MHz",
+                        "gain": "20 / 20 dB",
+                        "modulation": "BPSK (Default)",
+                    }
+                )
+                return
+            except Exception as exc:  # pragma: no cover
+                last_error = str(exc)
+                self.usrp = None
+                self.hw_state["USRP-01"]["center"] = (
+                    f"Connect retry {retry + 1}/6: {last_error}"
+                )
+                if retry < 5:
+                    time.sleep(1.5)
+        self.hw_state["USRP-01"]["center"] = f"Connect failed: {last_error}"
 
     def disconnect_usrp(self) -> None:
         """释放 USRP 设备的 UHD 句柄，使其他进程（如 GNU Radio 视频流）可以独占访问。"""
@@ -128,7 +140,12 @@ class SDRController:
 
     def reconnect_usrp(self) -> None:
         """重新打开 USRP 设备连接（外部进程释放后调用）。"""
-        self._connect()
+        for attempt in range(5):
+            self._connect()
+            if self.usrp is not None:
+                return
+            time.sleep(0.5)
+        # 最后一次尝试，即使失败也不再等待
 
     def get_hardware_snapshot(self) -> dict[str, dict[str, str]]:
         return deepcopy(self.hw_state)
@@ -141,7 +158,10 @@ class SDRController:
         if not self.driver_available:
             return self._error("UHD Python 驱动未安装，当前只能使用知识检索和前端界面。")
         if self.usrp is None:
-            return self._error("USRP 未连接，请检查设备 IP、网线和 UHD 驱动。")
+            # 延迟重连：可能在 uvicorn --reload 模式下 reloader 进程抢占了 USRP
+            self._connect()
+            if self.usrp is None:
+                return self._error("USRP 未连接，请检查设备 IP、网线和 UHD 驱动。")
         return None
 
     def _set_state(
