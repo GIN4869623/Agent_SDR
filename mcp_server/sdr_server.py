@@ -1,3 +1,10 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# DEPRECATED — replaced by src/mcp/__init__.py
+#
+# The new MCP server (src/mcp/__init__.py) is the single source of truth for
+# tools, resources, and prompts.  This file is kept for reference.
+# ═══════════════════════════════════════════════════════════════════════════
+
 """MCP server exposing SDR hardware tools, knowledge base, and hardware status
 as standard MCP tools, resources, and prompts.
 

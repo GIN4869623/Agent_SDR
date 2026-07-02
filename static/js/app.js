@@ -711,18 +711,21 @@ async function sendMessage() {
 
     const cancelBubbleRaf = () => {
         if (bubbleRaf) {
-            cancelAnimationFrame(bubbleRaf);
+            clearTimeout(bubbleRaf);
             bubbleRaf = 0;
         }
     };
 
+    // Render in ~30ms batches so fast models still show visible streaming.
+    // requestAnimationFrame coalesces too aggressively when tokens arrive
+    // in the same 16ms frame (e.g. qwen3.5:122b outputs 50+ tok/s).
     const scheduleBubbleUpdate = () => {
         if (bubbleRaf) return;
-        bubbleRaf = requestAnimationFrame(() => {
+        bubbleRaf = setTimeout(() => {
             bubbleRaf = 0;
             bubbleEl.innerHTML = formatAiBubbleHtml(assembled);
             chatBox.scrollTop = chatBox.scrollHeight;
-        });
+        }, 30);
     };
 
     try {

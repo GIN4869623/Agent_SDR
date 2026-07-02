@@ -1,24 +1,58 @@
-# OpenClaw SDR Refactored
+# Agent SDR — Claude Code Architecture
 
-这是基于原始单文件项目重构出的新版本，目标是把 UI、配置、Agent、硬件控制、技能定义和知识检索彻底解耦，便于继续接入 LangGraph、RAG 和更多 SDR 技能。
+基于 Claude Code 的 MCP-centric 架构重构。核心理念：**MCP Server 是唯一的工具接口，
+Agent Loop 围绕 MCP 工具进行推理-执行-观察循环，Skills 按需注入提示词。**
+
+## 架构概览
+
+```
+外部 Agent (Claude Code)
+        │
+        │ MCP/stdio          ┌──────────────┐
+        ▼                    │   Web UI     │
+┌──────────────┐             │  (SSE + HTTP)│
+│  MCP Server  │◄────────────┤              │
+│ (stdio模式)  │             └──────┬───────┘
+└──────────────┘                    │
+        │                           │ MCP/SSE
+        │                    ┌──────┴───────┐
+        │                    │  MCP Server  │
+        └────────────────────┤  (SSE模式)   │
+                             └──────┬───────┘
+                                    │
+                             ┌──────┴───────┐
+                             │  Agent Loop  │
+                             │ think→act→   │
+                             │ observe→loop │
+                             └──────────────┘
+```
 
 ## 项目结构
 
 ```text
-openclaw_sdr_refactored/
-├── main.py
-├── config/
-├── prompts/
-├── core/
-├── hardware/
-├── tools/
-├── data/
-├── static/
-├── .env.example
-├── .gitignore
-├── requirements.txt
-├── requirements-optional.txt
-└── README.md
+Agent_SDR/
+├── main.py                     # 向后兼容入口 → src/server.py
+├── src/                        # ★ 新架构代码
+│   ├── server.py               # FastAPI + SSE + MCP 入口
+│   ├── cli.py                  # MCP stdio 入口（给外部 Agent）
+│   ├── config.py               # 统一配置
+│   ├── prompts.py              # 系统提示词
+│   ├── mcp/
+│   │   └── __init__.py         # MCP Server + MCPToolRegistry（唯一工具源）
+│   ├── agent/
+│   │   ├── loop.py             # Agent 循环（think → act → observe）
+│   │   └── context.py          # 上下文组装
+│   └── skills/
+│       └── registry.py         # 技能加载（从 .md 文件）
+├── hardware/                   # 硬件控制层（USRP, 视频流）
+├── core/                       # 领域层（记忆, RAG）
+├── skill/                      # 技能定义（.md 文件 + 匹配引擎）
+├── tools/                      # [废弃] Pydantic 模型保留给 skill 兼容
+├── mcp_server/                 # [废弃] 旧 MCP server，已迁移到 src/mcp/
+├── graph/                      # [废弃] 旧 LangGraph，已替换为 Agent Loop
+├── static/                     # 前端
+├── data/                       # 知识库文档
+└── .env.example
 ```
 
 ## 目录和脚本说明
@@ -179,38 +213,77 @@ openclaw_sdr_refactored/
 
 ## 运行方式
 
-1. 复制 `.env.example` 为 `.env`，按你的设备和模型环境调整参数。
-2. 安装基础依赖：
-
-```bash
-pip install -r requirements.txt
-```
-
-3. 若要继续做 LangGraph / 向量数据库版，再装可选依赖：
-
-```bash
-pip install -r requirements-optional.txt
-```
-
-4. 启动服务：
+### 1. Web UI 模式（浏览器访问）
 
 ```bash
 cd ~/Desktop/Agent_SDR
 source .venv/bin/activate
-uvicorn main:app
+uvicorn main:app --host 127.0.0.1 --port 8000
+# 浏览器访问 http://127.0.0.1:8000
 ```
 
-5. 浏览器访问：
+### 2. MCP stdio 模式（给 Claude Code 或其他 Agent 调用）
 
-```text
-http://127.0.0.1:8000
+```bash
+cd ~/Desktop/Agent_SDR
+source .venv/bin/activate
+python -m src.cli
 ```
+
+**Claude Code 配置** — 在 `~/.claude/claude_desktop_config.json` 或项目的 `.claude/mcp.json` 中添加：
+
+```json
+{
+  "mcpServers": {
+    "sdr": {
+      "command": "python",
+      "args": ["-m", "src.cli"],
+      "cwd": "/home/wenchaoxia/Desktop/Agent_SDR"
+    }
+  }
+}
+```
+
+配置后，Claude Code 会自动发现并调用 SDR 工具：
+
+```
+可用的 MCP 工具:
+  - perform_physical_scan    (扫频/测底噪)
+  - tone_loopback_visualize  (正弦波可视化)
+  - text_fsk_send_and_receive (文本收发)
+  - adaptive_modulation_transmit (自适应调制)
+  - auto_optimal_transmit   (认知选频)
+  - search_sdr_knowledge    (知识检索)
+  - start_video_stream / stop_video_stream (视频流)
+  - ...
+```
+
+## 架构迁移对照
+
+| 旧模块 | 新模块 | 说明 |
+|--------|--------|------|
+| `core/agent.py` (1700行) | `src/agent/loop.py` (200行) | 路由判断+正则提取 → 技能匹配+LLM自主决策 |
+| `graph/` (LangGraph) | `src/agent/loop.py` | 4节点图 → 简洁循环 |
+| `tools/` (ToolRegistry) | `src/mcp/__init__.py` (MCPToolRegistry) | 工具只定义一次 |
+| `mcp_server/sdr_server.py` | `src/mcp/__init__.py` | MCP 成为核心而非外挂 |
+| `config/settings.py` | `src/config.py` | 统一配置入口 |
+| `prompts/` | `src/prompts.py` | 提示词管理 |
+| 无 | `src/cli.py` | 新增: stdio 模式暴露给外部 Agent |
+
+## 开发入口（新架构）
+
+- 想新增 MCP 工具：改 `src/mcp/__init__.py` → `_register()` 装饰器
+- 想改 Agent 循环逻辑：改 `src/agent/loop.py`
+- 想改系统提示词：改 `src/prompts.py`
+- 想新增技能匹配：在 `skill/skills/` 创建 `.md` 文件
+- 想改硬件控制：改 `hardware/sdr_controller.py`（不变）
 
 ## 注意
 
 1. `uhd` 一般不是通过 `pip` 安装，需要按 USRP/UHD 官方流程单独安装 Python 绑定。
-2. 当前 `core/rag.py` 是零额外依赖的本地检索实现，适合先跑通架构；后续可直接替换成 ChromaDB / FAISS。
+2. 当前 `core/rag.py` 是百炼云端知识库实现，适合先跑通架构；后续可直接替换成 ChromaDB / FAISS。
 3. 当前 Agent 默认仍走 OpenAI 兼容接口，`OLLAMA_BASE_URL` 保持了你原项目的兼容模式。
+4. 旧代码 (`core/agent.py`, `graph/`, `mcp_server/`, `tools/ToolRegistry`) 已标记为废弃，新功能请在 `src/` 下开发。
 
 ## 演示视频
 

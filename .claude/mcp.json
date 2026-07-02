@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "sdr": {
+      "command": "python",
+      "args": ["-m", "src.cli"],
+      "cwd": "/home/wenchaoxia/Desktop/Agent_SDR"
+    }
+  }
+}

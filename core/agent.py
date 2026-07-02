@@ -1,3 +1,13 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# DEPRECATED — replaced by src/agent/loop.py
+#
+# This file is no longer used by the main code path.  The new Claude Code
+# architecture uses AgentLoop (src/agent/loop.py) with MCP tool registry
+# instead of regex-based routing + ToolRegistry.
+#
+# Kept for reference and potential fallback during migration.
+# ═══════════════════════════════════════════════════════════════════════════
+
 from __future__ import annotations
 
 import json
