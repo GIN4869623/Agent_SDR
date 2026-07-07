@@ -218,8 +218,8 @@ Agent_SDR/
 ```bash
 cd ~/Desktop/Agent_SDR
 source .venv/bin/activate
-uvicorn main:app --host 127.0.0.1 --port 8000
-# 浏览器访问 http://127.0.0.1:8000
+uvicorn main:app --host 0.0.0.0 --port 8000
+# 浏览器访问 http://0.0.0.0:8000
 ```
 
 ### 2. MCP stdio 模式（给 Claude Code 或其他 Agent 调用）

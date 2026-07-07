@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import socket
+import uuid
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI
@@ -24,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from src.agent.loop import _agent_id_for_tool, _post_console_event
 from src.config import settings
 from src.mcp import create_sdr_mcp
 
@@ -153,9 +155,11 @@ def get_visualization_state() -> dict:
 
 
 @app.post("/api/hardware/stop")
-def stop_hardware_task() -> dict:
+async def stop_hardware_task() -> dict:
     video_result = video_controller.stop()
     hw_result = controller.stop_hardware_task()
+    # Flush any pending console completion — the USRP is now idle
+    agent_loop._flush_pending_completion()
     return {"hardware": hw_result, "video_stream": video_result}
 
 
@@ -174,6 +178,17 @@ async def chat(payload: ChatRequest) -> dict:
     reply_parts: list[str] = []
     tool_logs: list[str] = []
     final_payload: dict[str, Any] = {}
+    run_id = str(uuid.uuid4())
+
+    # Notify console synchronously — must arrive before run_stream starts
+    await _post_console_event(
+        agent_id="usrp",
+        run_id=run_id,
+        session_id=payload.session_id,
+        phase="started",
+        task=payload.instruction,
+        tool_name="",
+    )
 
     try:
         async for event in agent_loop.run_stream(
@@ -181,6 +196,7 @@ async def chat(payload: ChatRequest) -> dict:
             session_id=payload.session_id,
             mode=payload.mode,
             temperature=payload.temperature,
+            run_id=run_id,
         ):
             t = event.get("type")
             if t == "delta" and event.get("text"):
@@ -243,11 +259,24 @@ async def chat_stream(payload: ChatRequest) -> StreamingResponse:
 
     async def event_gen() -> AsyncIterator[str]:
         import asyncio as _asyncio
+
+        run_id = str(uuid.uuid4())
+        # Notify console synchronously — must arrive before run_stream starts
+        await _post_console_event(
+            agent_id="usrp",
+            run_id=run_id,
+            session_id=payload.session_id,
+            phase="started",
+            task=payload.instruction,
+            tool_name="",
+        )
+
         async for event in agent_loop.run_stream(
             instruction=payload.instruction,
             session_id=payload.session_id,
             mode=payload.mode,
             temperature=payload.temperature,
+            run_id=run_id,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             # Force the event loop to flush after each delta so the browser

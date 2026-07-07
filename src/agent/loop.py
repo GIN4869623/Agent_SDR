@@ -16,16 +16,33 @@ All events are streamed as dicts for SSE transport.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import os
 import time
+import uuid
 from collections import defaultdict
 from typing import Any, AsyncIterator
+
+import aiohttp
+
+logger = logging.getLogger(__name__)
 
 from core.memory import ConversationMemory
 from src.agent.context import build_messages
 from src.config import settings
 from src.mcp import MCPToolRegistry
 from skill.skill_spec import SkillRegistry
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Console event reporting config
+# ═══════════════════════════════════════════════════════════════════════════
+
+CONSOLE_URL: str = os.getenv("CONSOLE_EVENT_URL", "http://127.0.0.1:3000")
+CONSOLE_TOKEN: str = os.getenv(
+    "CONSOLE_EVENT_TOKEN", "dev-local-token-change-in-production"
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -53,6 +70,111 @@ def _tool_result_msg(tool_call_id: str, name: str, content: str) -> dict:
     }
 
 
+def _agent_id_for_tool(tool_name: str) -> str:
+    """Map tool name to agent ID for the multi-agent console.
+
+    search_sdr_knowledge → "rag"
+    all hardware tools       → "usrp"
+    """
+    if tool_name == "search_sdr_knowledge":
+        return "rag"
+    return "usrp"
+
+
+async def _post_console_event(
+    agent_id: str,
+    run_id: str,
+    session_id: str,
+    phase: str,
+    task: str,
+    tool_name: str,
+    detail: str = "",
+) -> None:
+    """Send a single event POST to the multi-agent console (awaitable).
+
+    Callers that need guaranteed ordering (e.g. the initial "started" event)
+    should await this directly.  For fire-and-forget use, call
+    :func:`report_to_console` instead.
+    """
+    try:
+        payload = {
+            "type": "agent.activity",
+            "agentId": agent_id,
+            "runId": run_id,
+            "sessionId": session_id,
+            "phase": phase,
+            "task": task,
+            "toolName": tool_name,
+            "detail": detail,
+        }
+        timeout = aiohttp.ClientTimeout(total=2)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                f"{CONSOLE_URL}/api/integrations/agent-events",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {CONSOLE_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+            ) as resp:
+                if resp.status >= 400:
+                    body = await resp.text()
+                    logger.warning(
+                        "Console event rejected (HTTP %s): %s",
+                        resp.status,
+                        body[:200],
+                    )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Console event timeout (%s) — is the console running?",
+            CONSOLE_URL,
+        )
+    except aiohttp.ClientConnectorError as exc:
+        logger.warning(
+            "Console unreachable (%s): %s — check IP/port and network",
+            CONSOLE_URL,
+            exc,
+        )
+    except aiohttp.ClientError as exc:
+        logger.warning("Console event network error: %s", exc)
+    except Exception:
+        logger.warning("Console event unexpected error", exc_info=True)
+
+
+def report_to_console(
+    agent_id: str,
+    run_id: str,
+    session_id: str,
+    phase: str,
+    task: str,
+    tool_name: str,
+    detail: str = "",
+) -> None:
+    """Fire-and-forget POST to the multi-agent console.
+
+    Schedules an async HTTP call via asyncio.create_task() so it never
+    blocks the SSE main loop.
+
+    If the console is unreachable the error is logged at WARNING level
+    — normal business is unaffected.
+    """
+
+    try:
+        asyncio.create_task(
+            _post_console_event(
+                agent_id=agent_id,
+                run_id=run_id,
+                session_id=session_id,
+                phase=phase,
+                task=task,
+                tool_name=tool_name,
+                detail=detail,
+            )
+        )
+    except RuntimeError:
+        logger.debug("Console event skipped: no running event loop")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Agent Loop
 # ═══════════════════════════════════════════════════════════════════════════
@@ -72,6 +194,9 @@ class AgentLoop:
         self.tools = tool_registry
         self.skills = skill_registry
         self.memory = memory
+        self._pending_console_run_id: str | None = None
+        self._pending_console_session_id: str = ""
+        self._pending_console_instruction: str = ""
 
     # ── public API ──────────────────────────────────────────────────────
 
@@ -87,6 +212,23 @@ class AgentLoop:
             return max(0.0, min(2.0, float(override)))
         return float(settings.temperature_map[self.normalize_mode(mode)])
 
+    def _flush_pending_completion(self) -> None:
+        """If hardware became idle and a completion is pending, send it now."""
+        if (
+            self._pending_console_run_id is not None
+            and not self.tools.is_hardware_busy()
+        ):
+            report_to_console(
+                agent_id="usrp",
+                run_id=self._pending_console_run_id,
+                session_id=self._pending_console_session_id,
+                phase="completed",
+                task=self._pending_console_instruction,
+                tool_name="",
+                detail="USRP 后台任务已结束",
+            )
+            self._pending_console_run_id = None
+
     async def run_stream(
         self,
         instruction: str,
@@ -94,6 +236,7 @@ class AgentLoop:
         mode: str = "think",
         temperature: float | None = None,
         max_turns: int | None = None,
+        run_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Execute the agent loop, yielding SSE-compatible events.
 
@@ -110,6 +253,7 @@ class AgentLoop:
         active_model = self.resolve_model(selected_mode)
         active_temp = self.resolve_temperature(selected_mode, temperature)
         max_turns = max_turns or settings.max_tool_turns
+        run_id = run_id or str(uuid.uuid4())
 
         # ── Step 1: Skill matching ──
         skill = None
@@ -309,6 +453,20 @@ class AgentLoop:
                     }
                     yield {"type": "tool_log", "line": log_line}
 
+                    # Per-tool unique runId — keeps each tool node independent
+                    # from the main task node and from other tool nodes.
+                    tool_run_id = str(uuid.uuid4())
+
+                    # Fire-and-forget: notify console tool started
+                    report_to_console(
+                        agent_id=_agent_id_for_tool(tool_name),
+                        run_id=tool_run_id,
+                        session_id=session_id,
+                        phase="tool_started",
+                        task=instruction,
+                        tool_name=tool_name,
+                    )
+
                     # Execute via MCP
                     tool_start = time.perf_counter()
                     result_json = await self.tools.call(tool_name, tool_args)
@@ -332,6 +490,21 @@ class AgentLoop:
                         "result": result_obj,
                         "elapsed_ms": tool_elapsed,
                     }
+
+                    # Fire-and-forget: notify console tool completed
+                    report_to_console(
+                        agent_id=_agent_id_for_tool(tool_name),
+                        run_id=tool_run_id,
+                        session_id=session_id,
+                        phase="tool_completed",
+                        task=instruction,
+                        tool_name=tool_name,
+                        detail=f"耗时 {tool_elapsed:.0f}ms, 状态 {result_obj.get('status', 'unknown')}",
+                    )
+
+                    # Flush any pending task completion (e.g. stop_hardware_task
+                    # may have just released the USRP)
+                    self._flush_pending_completion()
 
                     tool_call_history.append(
                         {
@@ -369,6 +542,31 @@ class AgentLoop:
             # ── Done ──
             total_ms = _elapsed_ms(request_start)
             tools_executed = len([tc for tc in tool_call_history if tc.get("status") == "success"])
+
+            # Notify console: task completed → main node disappears.
+            # BUT: if the USRP is still running a background task
+            # (e.g. tone_loopback_visualize), defer completion until
+            # stop_hardware_task is called and hardware becomes idle.
+            if self.tools.is_hardware_busy():
+                # Hardware still busy — save completion for later flush
+                self._pending_console_run_id = run_id
+                self._pending_console_session_id = session_id
+                self._pending_console_instruction = instruction
+                logger.info(
+                    "Deferred console completion for run %s — USRP still active",
+                    run_id,
+                )
+            else:
+                report_to_console(
+                    agent_id="usrp",
+                    run_id=run_id,
+                    session_id=session_id,
+                    phase="completed",
+                    task=instruction,
+                    tool_name="",
+                    detail=f"执行 {tools_executed}/{len(tool_call_history)} 个工具, 总耗时 {total_ms:.0f}ms",
+                )
+
             yield {
                 "type": "done",
                 "status": "success",
@@ -388,6 +586,18 @@ class AgentLoop:
             }
 
         except Exception as exc:
+            # Flush any pending completion first (hardware may have been released)
+            self._flush_pending_completion()
+            # Fire-and-forget: notify console of failure
+            report_to_console(
+                agent_id="usrp",
+                run_id=run_id,
+                session_id=session_id,
+                phase="failed",
+                task=instruction,
+                tool_name="",
+                detail=str(exc),
+            )
             yield {
                 "type": "error",
                 "message": str(exc),

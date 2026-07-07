@@ -42,9 +42,10 @@ class ToolDef:
 class MCPToolRegistry:
     """Holds all tool definitions.  Used by both Agent Loop and MCP transport."""
 
-    def __init__(self) -> None:
+    def __init__(self, controller: SDRController | None = None) -> None:
         self._tools: list[ToolDef] = []
         self._by_name: dict[str, ToolDef] = {}
+        self._controller = controller
 
     def register(self, tool: ToolDef) -> None:
         self._tools.append(tool)
@@ -70,6 +71,15 @@ class MCPToolRegistry:
             return json.dumps(
                 {"status": "error", "error": f"技能 {name} 执行失败: {exc}"}
             )
+
+    def is_hardware_busy(self) -> bool:
+        """Check if the USRP has any active background task.
+
+        Returns False when no controller is available (e.g. dry-run).
+        """
+        if self._controller is None:
+            return False
+        return self._controller.has_background_task()
 
     def as_openai_tools(self, category: str | None = None) -> list[dict]:
         """Convert tools to OpenAI function-calling format."""
@@ -115,7 +125,7 @@ def create_sdr_mcp(
             "Default tone frequency: 100 kHz."
         ),
     )
-    registry = MCPToolRegistry()
+    registry = MCPToolRegistry(controller=controller)
 
     # ── Helper: register tool in both FastMCP and MCPToolRegistry ──
 

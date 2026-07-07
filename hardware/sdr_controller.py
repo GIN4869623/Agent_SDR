@@ -340,6 +340,23 @@ class SDRController:
     def _error(self, message: str, **payload: Any) -> dict[str, Any]:
         return {"status": "error", "error": message, **payload}
 
+    def has_background_task(self) -> bool:
+        """Return True if the USRP has an active background hardware task."""
+        thread = self.bg_thread
+        tx_stream, rx_stream, tx_thread, rx_thread = self._capture_background_runtime()
+        visualization_active = bool(
+            self.get_visualization_snapshot().get("active", False)
+        )
+        return (
+            thread is not None
+            or tx_stream is not None
+            or rx_stream is not None
+            or tx_thread is not None
+            or rx_thread is not None
+            or visualization_active
+            or self.hw_lock.locked()
+        )
+
     def stop_hardware_task(self) -> dict[str, Any]:
         thread = self.bg_thread
         tx_stream, rx_stream, tx_thread, rx_thread = self._capture_background_runtime()

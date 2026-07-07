@@ -58,6 +58,14 @@ class Settings(BaseModel):
     bailian_embedding_model: str = Field(
         default=os.getenv("BAILIAN_EMBEDDING_MODEL", "text-embedding-v2")
     )
+    # ── Console event reporting ──
+    console_event_url: str = Field(
+        default=os.getenv("CONSOLE_EVENT_URL", "http://127.0.0.1:3000")
+    )
+    console_event_token: str = Field(
+        default=os.getenv("CONSOLE_EVENT_TOKEN", "dev-local-token-change-in-production")
+    )
+
     knowledge_dir: Path = Field(default=BASE_DIR / "data")
     static_dir: Path = Field(default=BASE_DIR / "static")
 
