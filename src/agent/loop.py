@@ -27,6 +27,8 @@ from typing import Any, AsyncIterator
 
 import aiohttp
 
+from src.mcp.broadcast import broadcast_event
+
 logger = logging.getLogger(__name__)
 
 from core.memory import ConversationMemory
@@ -150,15 +152,31 @@ def report_to_console(
     tool_name: str,
     detail: str = "",
 ) -> None:
-    """Fire-and-forget POST to the multi-agent console.
+    """Send an agent-activity event to the multi-agent console.
 
-    Schedules an async HTTP call via asyncio.create_task() so it never
-    blocks the SSE main loop.
+    Prefers MCP notification broadcast over the existing SSE transport
+    (no extra connection, lower latency).  Falls back to HTTP POST when
+    no MCP client is connected.
 
-    If the console is unreachable the error is logged at WARNING level
-    — normal business is unaffected.
+    Always fire-and-forget — never blocks the SSE main loop.
     """
 
+    payload = {
+        "type": "agent.activity",
+        "agentId": agent_id,
+        "runId": run_id,
+        "sessionId": session_id,
+        "phase": phase,
+        "task": task,
+        "toolName": tool_name,
+        "detail": detail,
+    }
+
+    # ── Primary: MCP notification broadcast ──
+    if broadcast_event(payload):
+        return  # Delivered to at least one MCP client — done.
+
+    # ── Fallback: HTTP POST to console REST API ──
     try:
         asyncio.create_task(
             _post_console_event(
