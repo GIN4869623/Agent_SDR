@@ -1,6 +1,6 @@
 # USRP2943R手册
 
-- Source PDF: `/home/njupt/Desktop/USRP2943R手册.pdf`
+- Source PDF: `/home/wenchaoxia/下载/USRP2943R手册.pdf`
 - Page Range: 1-6
 
 ## Page 1

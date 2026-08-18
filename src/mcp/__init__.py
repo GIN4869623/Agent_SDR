@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from core.rag import LocalKnowledgeBase
 from hardware.sdr_controller import SDRController
@@ -123,6 +124,11 @@ def create_sdr_mcp(
             "generate and visualize tones, stream video via GNU Radio, and query the "
             "SDR knowledge base.  Default center frequency: 2.4 GHz.  "
             "Default tone frequency: 100 kHz."
+        ),
+        # 关闭 DNS rebinding 防护：本平台在内网多机（192.168.x）间访问，
+        # SDK 默认只允许 localhost，导致经局域网 IP 访问 /mcp/sse 被 421 拒绝。
+        transport_security=TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
         ),
     )
     registry = MCPToolRegistry(controller=controller)
@@ -446,7 +452,7 @@ def create_sdr_mcp(
 
     @_register(
         name="search_sdr_knowledge",
-        description="从云端知识库检索 SDR 理论、设备规格、实验文档和项目资料。",
+        description="从本地知识库检索 SDR 理论、设备规格、实验文档和项目资料。",
         parameters={
             "type": "object",
             "properties": {
@@ -466,13 +472,72 @@ def create_sdr_mcp(
     )
     async def search_sdr_knowledge(query: str, top_k: int = 3) -> str:
         result = knowledge_base.search(query, top_k=top_k)
+        message = f"已返回 {len(result)} 条知识检索结果。"
+        if not result:
+            message += " 知识库未命中，可调用 web_search 联网搜索补充。"
         return json.dumps(
             {
                 "status": "success",
-                "message": f"已返回 {len(result)} 条知识检索结果。",
+                "message": message,
                 "results": [
                     {"source": hit.source, "snippet": hit.snippet, "score": hit.score}
                     for hit in result
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Web Search Tool (knowledge fallback)
+    # ─────────────────────────────────────────────────────────────────────
+
+    @_register(
+        name="web_search",
+        description=(
+            "联网搜索 SDR 相关知识。当本地知识库（search_sdr_knowledge）"
+            "返回 0 条结果、或返回内容无法回答用户问题时，使用此工具上网获取补充信息。"
+            "搜索时务必使用精简的专业关键词，不要用完整问句。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "用于搜索的精简专业关键词，例如 'OFDM 正交频分复用'、"
+                        "'匹配滤波器'。不要带'什么是/是什么/介绍一下'等口语词。"
+                    ),
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "返回结果数量。",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+        category="knowledge",
+    )
+    async def web_search(query: str, max_results: int = 5) -> str:
+        from core.web_search import search_web
+
+        results = search_web(query, max_results=max_results)
+        if not results:
+            return json.dumps(
+                {
+                    "status": "empty",
+                    "message": f"未搜索到与「{query}」相关的网络内容。",
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "status": "success",
+                "message": f"已返回 {len(results)} 条网络搜索结果。",
+                "results": [
+                    {"title": r.title, "url": r.url, "snippet": r.snippet}
+                    for r in results
                 ],
             },
             ensure_ascii=False,

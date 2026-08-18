@@ -28,20 +28,6 @@ from pydantic import BaseModel, Field
 from src.agent.loop import _agent_id_for_tool, _post_console_event
 from src.config import settings
 from src.mcp import create_sdr_mcp
-from src.mcp.broadcast import set_transport
-
-# ── Monkey-patch: capture SseServerTransport for MCP event broadcast ──
-import mcp.server.sse as _sse_mod
-
-_original_sse_init = _sse_mod.SseServerTransport.__init__
-
-
-def _patched_sse_init(self, endpoint, security_settings=None):
-    _original_sse_init(self, endpoint, security_settings)
-    set_transport(self)
-
-
-_sse_mod.SseServerTransport.__init__ = _patched_sse_init
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Bootstrap — same as old main.py
@@ -54,8 +40,10 @@ from hardware.video_stream_controller import VideoStreamController
 
 memory = ConversationMemory(max_messages=settings.session_history_limit)
 knowledge_base = LocalKnowledgeBase(
-    app_id=settings.bailian_app_id,
     api_key=settings.bailian_api_key,
+    embedding_model=settings.bailian_embedding_model,
+    knowledge_dir=settings.knowledge_dir,
+    index_dir=settings.knowledge_dir / ".index",
 )
 controller = SDRController(settings.usrp_ip)
 video_controller = VideoStreamController(

@@ -45,7 +45,7 @@ Agent_SDR/
 │   └── skills/
 │       └── registry.py         # 技能加载（从 .md 文件）
 ├── hardware/                   # 硬件控制层（USRP, 视频流）
-├── core/                       # 领域层（记忆, RAG）
+├── core/                       # 领域层（记忆, RAG 向量检索）
 ├── skill/                      # 技能定义（.md 文件 + 匹配引擎）
 ├── tools/                      # [废弃] Pydantic 模型保留给 skill 兼容
 ├── mcp_server/                 # [废弃] 旧 MCP server，已迁移到 src/mcp/
@@ -72,12 +72,12 @@ Agent_SDR/
   用法：通常不需要改，只有当你新增了需要忽略的本地文件类型时才调整。
 
 - `requirements.txt`
-  功能：基础运行依赖，包含 FastAPI、OpenAI SDK、Pydantic、NumPy、Matplotlib 等。
+  功能：基础运行依赖，包含 FastAPI、OpenAI SDK、Pydantic、NumPy、Matplotlib、faiss-cpu、dashscope 等。
   用法：部署或初始化开发环境时执行 `pip install -r requirements.txt`。
 
 - `requirements-optional.txt`
-  功能：后续扩展依赖，预留给 LangChain、LangGraph、向量数据库等方案。
-  用法：只有在你准备接入 LangGraph、ChromaDB、FAISS 时再安装。
+  功能：后续扩展依赖，预留给 LangChain、LangGraph 等可选方案。
+  用法：只有在你准备接入 LangGraph、LangChain 时再安装。
 
 - `README.md`
   功能：项目说明文档。
@@ -126,8 +126,15 @@ Agent_SDR/
   用法：如果你要做更长会话、持久化会话、数据库存储会话，可以先改这里。
 
 - `core/rag.py`
-  功能：当前版本的本地知识检索实现，支持从 `data/` 目录读取 `.md` 和 `.txt` 并做轻量搜索。
-  用法：如果你想升级为 ChromaDB / FAISS / Embedding 检索，替换这个文件最合适。
+  功能：本地向量知识库。把 `data/` 下的 `.md`/`.txt` 分块后，用云端 embedding 生成向量，
+        写入本地 FAISS 索引（`data/.index`），查询时按余弦相似度检索并返回原文片段；
+        无 embedding 可用时自动降级为关键词匹配。
+  用法：调整分块大小/重叠、检索逻辑或替换向量库时改这里。
+
+- `core/embeddings.py`
+  功能：云端 embedding 封装（百炼 DashScope，模型 `qwen3.7-text-embedding`，1024 维）。
+        文档与查询必须使用同一模型，这里集中管理该选择。
+  用法：更换 embedding 模型或服务商时改这里。
 
 - `core/__init__.py`
   功能：包初始化文件。
@@ -172,8 +179,13 @@ Agent_SDR/
 ### `data/`
 
 - `data/`
-  功能：本地知识库目录，存放供 Agent 检索的教材、说明、实验文档。
-  用法：直接把 `.md` 或 `.txt` 文件丢到这里，重启服务后即可被 `core/rag.py` 读取。
+  功能：本地知识库的**唯一资料源**（single source of truth），存放教材、设备手册、实验文档。
+  用法：把 `.md`/`.txt` 直接丢进来（PDF 需先用 `scripts/import_pdf_to_kb.py` 转成 markdown 分块），
+        然后运行 `python scripts/build_index.py` 构建索引；服务启动后首次查询也会自动增量同步。
+
+- `data/.index/`
+  功能：本地 FAISS 向量索引（`vectors.npy` + `records.json` + `_manifest.json`），由构建脚本生成。
+  用法：已加入 `.gitignore`；重建用 `python scripts/build_index.py --force`。
 
 - `data/README.md`
   功能：说明知识库目录应该放什么类型的内容。
@@ -206,12 +218,22 @@ Agent_SDR/
 - 想改模型地址、模型名、USRP IP：改 `config/settings.py` 或 `.env`。
 - 想改 Agent 的角色、工具调用规则、回答风格：改 `prompts/system_prompts.py`。
 - 想把 OpenAI 兼容调用换成 LangGraph：重点改 `core/agent.py`。
-- 想把本地关键词检索换成向量数据库：重点改 `core/rag.py`。
+- 想调整知识库分块 / embedding / 向量检索：改 `core/rag.py`、`core/embeddings.py`。
 - 想新增一个硬件实验能力：先改 `hardware/sdr_controller.py`，再到 `tools/` 暴露成工具。
 - 想新增一个知识型工具：优先改 `tools/knowledge_tools.py`，必要时配合 `core/rag.py`。
 - 想改网页布局和交互：改 `static/index.html`、`static/css/app.css`、`static/js/app.js`。
 
 ## 运行方式
+
+### 0. 构建本地知识索引（首次或资料更新后）
+
+```bash
+cd ~/Desktop/Agent_SDR
+source .venv/bin/activate
+python scripts/build_index.py            # 增量构建；--force 全量重建
+```
+
+索引写入 `data/.index/`；服务启动后的首次查询也会自动增量同步 `data/` 的变化。
 
 ### 1. Web UI 模式（浏览器访问）
 
@@ -268,6 +290,7 @@ python -m src.cli
 | `mcp_server/sdr_server.py` | `src/mcp/__init__.py` | MCP 成为核心而非外挂 |
 | `config/settings.py` | `src/config.py` | 统一配置入口 |
 | `prompts/` | `src/prompts.py` | 提示词管理 |
+| `core/rag.py`（百炼云端 RAG 应用） | `core/rag.py` + `core/embeddings.py` | 云端托管 RAG → 本地 FAISS 向量检索 |
 | 无 | `src/cli.py` | 新增: stdio 模式暴露给外部 Agent |
 
 ## 开发入口（新架构）
@@ -276,12 +299,13 @@ python -m src.cli
 - 想改 Agent 循环逻辑：改 `src/agent/loop.py`
 - 想改系统提示词：改 `src/prompts.py`
 - 想新增技能匹配：在 `skill/skills/` 创建 `.md` 文件
+- 想调整知识库分块 / embedding / 向量检索：改 `core/rag.py`、`core/embeddings.py`
 - 想改硬件控制：改 `hardware/sdr_controller.py`（不变）
 
 ## 注意
 
 1. `uhd` 一般不是通过 `pip` 安装，需要按 USRP/UHD 官方流程单独安装 Python 绑定。
-2. 当前 `core/rag.py` 是百炼云端知识库实现，适合先跑通架构；后续可直接替换成 ChromaDB / FAISS。
+2. 知识库采用「本地 FAISS 向量检索 + 云端 embedding（百炼 `qwen3.7-text-embedding`）」方案：embedding 只在构建索引/资料变更时调用（一次性按 token 计费），查询时检索全程本地、零云端检索开销。
 3. 当前 Agent 默认仍走 OpenAI 兼容接口，`OLLAMA_BASE_URL` 保持了你原项目的兼容模式。
 4. 旧代码 (`core/agent.py`, `graph/`, `mcp_server/`, `tools/ToolRegistry`) 已标记为废弃，新功能请在 `src/` 下开发。
 

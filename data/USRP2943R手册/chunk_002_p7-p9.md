@@ -1,6 +1,6 @@
 # USRP2943R手册
 
-- Source PDF: `/home/njupt/Desktop/USRP2943R手册.pdf`
+- Source PDF: `/home/wenchaoxia/下载/USRP2943R手册.pdf`
 - Page Range: 7-9
 
 ## Page 7
@@ -74,7 +74,7 @@ Planet web page at ni.com/environment. This page contains the environmental
 regulations and directives with which NI complies, as well as other environmental 
 information not included in this document. 
 EU and UK Customers EU and UK Customers 
-• Waste Electrical and Electronic Equipment (WEEE)—A t the end of the product 
+• Waste Electrical and Electronic Equipment (WEEE)—At the end of the product 
 life cycle, all NI products must be disposed of according to local laws and 
 regulations. For more information about how to recycle NI products in your region, 
 visit ni.com/environment/weee. 

@@ -40,8 +40,10 @@ async def main() -> None:
     # Init domain layer
     controller = SDRController(settings.usrp_ip)
     knowledge_base = LocalKnowledgeBase(
-        app_id=settings.bailian_app_id,
         api_key=settings.bailian_api_key,
+        embedding_model=settings.bailian_embedding_model,
+        knowledge_dir=settings.knowledge_dir,
+        index_dir=settings.knowledge_dir / ".index",
     )
     video_controller = VideoStreamController(
         release_cb=controller.disconnect_usrp,
