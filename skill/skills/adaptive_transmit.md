@@ -13,6 +13,12 @@ trigger_keywords:
   - 自动选择
 exclude_patterns:
   - "干净.{0,3}(信道|频点)|最优.{0,3}(频点|信道)|认知|找.{0,4}(干扰|噪声)"
+tool_names:
+  - adaptive_modulation_transmit
+workflow: atomic
+required_actions:
+  - select_modulation
+  - transmit_text
 ---
 
 # 自适应调制传输

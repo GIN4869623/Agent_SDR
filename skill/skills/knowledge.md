@@ -14,6 +14,12 @@ trigger_keywords:
   - 理论
   - 介绍
   - 解释
+tool_names:
+  - search_sdr_knowledge
+  - web_search
+workflow: fallback
+required_actions:
+  - answer_with_knowledge
 ---
 
 # SDR 知识检索
@@ -36,3 +42,8 @@ trigger_keywords:
 - 解码失败 → 可能频率偏移、符号间干扰、增益不匹配
 - 硬件正忙 → 先停止后台任务再重试
 - 连接异常 → 检查设备电源和网络配置
+
+## 工具工作流
+1. 第一阶段只调用 `search_sdr_knowledge`。
+2. 本地结果为空时，第二阶段才允许调用 `web_search`。
+3. 获得可用资料后停止调用工具并生成最终回答。

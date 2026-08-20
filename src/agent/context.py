@@ -15,6 +15,7 @@ def build_messages(
     instruction: str,
     history: list[dict[str, str]] | None = None,
     skill: SkillSpec | None = None,
+    route_note: str | None = None,
 ) -> list[dict[str, str]]:
     """Assemble the full message list for a single agent turn.
 
@@ -31,7 +32,12 @@ def build_messages(
     # 1. System prompt
     messages.append({"role": "system", "content": SYSTEM_PROMPT})
 
-    # 2. Skill injection (when a skill matches)
+    # 2. Route/workflow constraint.  This is an execution boundary, not just
+    # descriptive context: the loop also filters the actual tool list.
+    if route_note:
+        messages.append({"role": "system", "content": route_note})
+
+    # 3. Skill injection (when a skill matches)
     if skill is not None:
         skill_msg = SKILL_INJECTION_TEMPLATE.format(
             skill_name=skill.name,
@@ -40,11 +46,11 @@ def build_messages(
         )
         messages.append({"role": "system", "content": skill_msg})
 
-    # 3. Conversation history
+    # 4. Conversation history
     for item in history or []:
         messages.append(item)
 
-    # 4. Current user instruction
+    # 5. Current user instruction
     messages.append({"role": "user", "content": instruction})
 
     return messages

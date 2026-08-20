@@ -16,16 +16,18 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 import uuid
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from src.agent.loop import _agent_id_for_tool, _post_console_event
+from src.agent.trace import RunTraceStore
 from src.config import settings
 from src.mcp import create_sdr_mcp
 
@@ -62,6 +64,11 @@ mcp_server, tool_registry = create_sdr_mcp(
 from src.skills.registry import create_skill_registry
 
 skill_registry = create_skill_registry(controller, video_controller, knowledge_base)
+trace_store = RunTraceStore(
+    settings.agent_trace_path,
+    enabled=settings.agent_trace_enabled,
+    max_records=settings.agent_trace_max_records,
+)
 
 # Create agent loop
 from openai import OpenAI
@@ -78,6 +85,7 @@ agent_loop = AgentLoop(
     tool_registry=tool_registry,
     skill_registry=skill_registry,
     memory=memory,
+    trace_store=trace_store,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -171,6 +179,27 @@ def reset_session(payload: ResetSessionRequest) -> dict:
     return {"status": "success", "message": "Session context cleared."}
 
 
+@app.get("/api/agent/runs")
+def list_agent_runs(limit: int = 20) -> dict:
+    """Return the newest structured Agent work logs."""
+    return {
+        "status": "success",
+        "enabled": trace_store.enabled,
+        "retention_max_records": trace_store.max_records,
+        "retention_trim_to_records": trace_store.trim_to_records,
+        "runs": trace_store.list_recent(limit=limit),
+    }
+
+
+@app.get("/api/agent/runs/{run_id}")
+def get_agent_run(run_id: str) -> dict:
+    """Return one complete work log by run ID."""
+    record = trace_store.get(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Agent run log not found")
+    return record
+
+
 # ── Chat endpoints ───────────────────────────────────────────────────────
 
 
@@ -181,6 +210,7 @@ async def chat(payload: ChatRequest) -> dict:
     tool_logs: list[str] = []
     final_payload: dict[str, Any] = {}
     run_id = str(uuid.uuid4())
+    request_started_at = time.perf_counter()
 
     # Notify console synchronously — must arrive before run_stream starts
     await _post_console_event(
@@ -199,6 +229,7 @@ async def chat(payload: ChatRequest) -> dict:
             mode=payload.mode,
             temperature=payload.temperature,
             run_id=run_id,
+            request_started_at=request_started_at,
         ):
             t = event.get("type")
             if t == "delta" and event.get("text"):
@@ -209,8 +240,10 @@ async def chat(payload: ChatRequest) -> dict:
                 final_payload = event
             elif t == "error":
                 return {
-                    "status": "error",
+                    "status": "failed",
+                    "run_id": event.get("run_id", run_id),
                     "message": event.get("message", "Unknown error"),
+                    "diagnosis": event.get("diagnosis"),
                     "reply": "".join(reply_parts),
                     "hardware_logs": tool_logs,
                     "updated_history": memory.get_history(payload.session_id),
@@ -222,7 +255,8 @@ async def chat(payload: ChatRequest) -> dict:
                 }
     except Exception as exc:
         return {
-            "status": "error",
+            "status": "failed",
+            "run_id": run_id,
             "message": str(exc),
             "reply": "".join(reply_parts),
             "hardware_logs": tool_logs,
@@ -235,7 +269,10 @@ async def chat(payload: ChatRequest) -> dict:
         }
 
     return {
-        "status": final_payload.get("status", "success"),
+        "run_id": final_payload.get("run_id", run_id),
+        "status": final_payload.get("status", "failed"),
+        "termination_reason": final_payload.get("termination_reason"),
+        "diagnosis": final_payload.get("diagnosis"),
         "reply": final_payload.get("reply", "".join(reply_parts)),
         "hardware_logs": final_payload.get("hardware_logs", tool_logs),
         "updated_history": final_payload.get(
@@ -251,6 +288,12 @@ async def chat(payload: ChatRequest) -> dict:
             "active_temperature",
             agent_loop.resolve_temperature(payload.mode, payload.temperature),
         ),
+        "active_route": final_payload.get("active_route"),
+        "route_confidence": final_payload.get("route_confidence"),
+        "skill_matched": final_payload.get("skill_matched"),
+        "workflow": final_payload.get("workflow"),
+        "required_actions": final_payload.get("required_actions", []),
+        "completed_actions": final_payload.get("completed_actions", []),
         "timing": final_payload.get("timing"),
     }
 
@@ -263,6 +306,7 @@ async def chat_stream(payload: ChatRequest) -> StreamingResponse:
         import asyncio as _asyncio
 
         run_id = str(uuid.uuid4())
+        request_started_at = time.perf_counter()
         # Notify console synchronously — must arrive before run_stream starts
         await _post_console_event(
             agent_id="usrp",
@@ -279,6 +323,7 @@ async def chat_stream(payload: ChatRequest) -> StreamingResponse:
             mode=payload.mode,
             temperature=payload.temperature,
             run_id=run_id,
+            request_started_at=request_started_at,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             # Force the event loop to flush after each delta so the browser

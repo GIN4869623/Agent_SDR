@@ -27,6 +27,47 @@ Agent Loop 围绕 MCP 工具进行推理-执行-观察循环，Skills 按需注�
                              └──────────────┘
 ```
 
+### 语义路由与任务完成判定
+
+Web 客户端仍统一调用聊天接口；服务端收到 `instruction` 后先做内部语义路由：
+
+```text
+instruction
+  ├─ chat       → 不提供工具，直接回答
+  ├─ knowledge  → 本地知识检索，未命中时才开放联网搜索
+  └─ hardware   → 匹配 Skill，并按工作流阶段过滤可用工具
+```
+
+Skill 可以是单工具原子能力，也可以是多工具工作流。Agent 每一阶段只向模型暴露
+当前允许的工具集合。工具结果会转换为 `completed_actions`，只有覆盖任务的
+`required_actions` 且生成最终答复后，任务才返回 `success`；部分完成返回
+`incomplete`，没有有效结果返回 `failed`。
+
+### Agent 工作日志
+
+每次请求会按 `run_id` 写入一条结构化 JSONL 日志，默认位置为
+`logs/agent_runs.jsonl`。每条日志按“请求理解 → 任务计划 → LLM 决策 → 工具执行
+→ 循环控制 → 完成判断”记录：原始请求和使用的短时记忆数量、路由理由与业务意图、
+Skill 工作流和必需动作、每轮 LLM 的用途/候选工具/响应耗时、工具参数校验与三态业务
+效果、动作完成证据、重复调用、缺失动作、停止原因和故障归因。大型数组和长文本会
+自动截断，不会完整保存波形数据。
+
+`metrics.timing` 提供路由、计划、上下文、LLM 决策、知识检索、硬件执行和最终回复的
+分段耗时；`metrics.counts` 提供 LLM 调用、工具提议/执行/拒绝及重复调用次数。若模型
+服务返回 token usage，每轮 `metrics.llm_calls` 还会记录输入/输出 token 和生成速度。
+
+```text
+GET /api/agent/runs?limit=20       # 最近运行记录
+GET /api/agent/runs/{run_id}       # 某次请求的完整轨迹
+```
+
+日志采用滚动保留策略，默认最多保存最近 1000 次请求；写入新记录超过上限时会批量
+删除最旧的约 10%（单次最多 100 条），避免每次请求都重写整个日志文件。可通过
+`AGENT_TRACE_MAX_RECORDS` 修改数量，通过
+`AGENT_TRACE_ENABLED=false` 关闭，或用 `AGENT_TRACE_PATH` 修改保存位置。
+诊断字段 `stage` 会把问题定位到路由/Skill、参数校验、工具执行、循环控制、完成条件
+或最终回复阶段，并给出建议检查的文件。
+
 ## 项目结构
 
 ```text
@@ -41,6 +82,8 @@ Agent_SDR/
 │   │   └── __init__.py         # MCP Server + MCPToolRegistry（唯一工具源）
 │   ├── agent/
 │   │   ├── loop.py             # Agent 循环（think → act → observe）
+│   │   ├── router.py           # 语义路由、Skill 工作流和任务动作判定
+│   │   ├── trace.py            # 结构化工作日志与自动诊断
 │   │   └── context.py          # 上下文组装
 │   └── skills/
 │       └── registry.py         # 技能加载（从 .md 文件）

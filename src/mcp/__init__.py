@@ -82,9 +82,16 @@ class MCPToolRegistry:
             return False
         return self._controller.has_background_task()
 
-    def as_openai_tools(self, category: str | None = None) -> list[dict]:
+    def as_openai_tools(
+        self,
+        category: str | None = None,
+        names: list[str] | tuple[str, ...] | set[str] | None = None,
+    ) -> list[dict]:
         """Convert tools to OpenAI function-calling format."""
         tools = self.get_by_category(category) if category else self._tools
+        if names is not None:
+            allowed = set(names)
+            tools = [tool for tool in tools if tool.name in allowed]
         return [
             {
                 "type": "function",
@@ -578,7 +585,11 @@ def create_sdr_mcp(
         )
         async def video_stream_status() -> str:
             state = video_controller.get_state()
-            return json.dumps(state, ensure_ascii=False, indent=2)
+            return json.dumps(
+                {"status": "success", **state},
+                ensure_ascii=False,
+                indent=2,
+            )
 
     # ─────────────────────────────────────────────────────────────────────
     # Resources

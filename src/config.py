@@ -52,6 +52,20 @@ class Settings(BaseModel):
         default=int(os.getenv("FAST_HISTORY_MESSAGES", "4"))
     )
 
+    # ── Agent work log ──
+    agent_trace_enabled: bool = Field(
+        default=os.getenv("AGENT_TRACE_ENABLED", "true").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
+    agent_trace_path: Path = Field(
+        default=Path(
+            os.getenv("AGENT_TRACE_PATH", str(BASE_DIR / "logs" / "agent_runs.jsonl"))
+        )
+    )
+    agent_trace_max_records: int = Field(
+        default=int(os.getenv("AGENT_TRACE_MAX_RECORDS", "1000")), ge=1
+    )
+
     # ── Knowledge ──
     bailian_api_key: str = Field(default=os.getenv("BAILIAN_API_KEY", ""))
     bailian_app_id: str = Field(default=os.getenv("BAILIAN_APP_ID", ""))

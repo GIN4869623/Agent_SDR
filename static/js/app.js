@@ -267,8 +267,14 @@ function buildTimingSummary(timing, fallbackMs, statusLabel) {
     if (timing && Number(timing.tool_decision_ms) > 0) {
         parts.push(`规划 ${formatDurationMs(timing.tool_decision_ms)}`);
     }
-    if (timing && Number(timing.tool_execution_ms) > 0) {
-        parts.push(`技能 ${formatDurationMs(timing.tool_execution_ms)}`);
+    if (timing && Number(timing.hardware_execution_ms) > 0) {
+        parts.push(`硬件 ${formatDurationMs(timing.hardware_execution_ms)}`);
+    } else if (
+        timing
+        && Number(timing.tool_execution_ms) > 0
+        && Number(timing.knowledge_lookup_ms) <= 0
+    ) {
+        parts.push(`工具 ${formatDurationMs(timing.tool_execution_ms)}`);
     }
     if (timing && Number(timing.final_reply_ms) > 0) {
         parts.push(`回复 ${formatDurationMs(timing.final_reply_ms)}`);
@@ -280,7 +286,12 @@ function buildTimingSummary(timing, fallbackMs, statusLabel) {
         parts.push(`工具 ${Number(timing.tool_count)} 次`);
     }
     if (statusLabel) {
-        parts.push(statusLabel === "failed" ? "失败" : statusLabel);
+        const statusText = {
+            success: "成功",
+            incomplete: "未完成",
+            failed: "失败",
+        }[statusLabel] || statusLabel;
+        parts.push(statusText);
     }
 
     return parts.join(" | ");
@@ -792,7 +803,7 @@ async function sendMessage() {
                     } else if (data.type === "visualization" && data.action === "open") {
                         pendingVisualizationAutoOpen = true;
                         fetchVisualizationState();
-                    } else if (data.type === "done" && data.status === "success") {
+                    } else if (data.type === "done") {
                         if (data.active_mode === "fast" || data.active_mode === "think") {
                             currentMode = data.active_mode;
                             updateModeUI();
@@ -810,7 +821,19 @@ async function sendMessage() {
                         bubbleEl.innerHTML = formatAiBubbleHtml(reply);
                         chatBox.scrollTop = chatBox.scrollHeight;
 
-                        const hwLogs = data.hardware_logs || [];
+                        const hwLogs = [...(data.hardware_logs || [])];
+                        if (data.status !== "success" && data.run_id) {
+                            hwLogs.push(`运行追踪 ID: ${data.run_id}`);
+                        }
+                        if (data.status !== "success" && data.diagnosis) {
+                            const stage = data.diagnosis.stage || "unknown";
+                            const summary = data.diagnosis.summary || "未提供诊断摘要";
+                            hwLogs.push(`问题定位 [${stage}]: ${summary}`);
+                            const files = data.diagnosis.suggested_files || [];
+                            if (files.length > 0) {
+                                hwLogs.push(`建议检查: ${files.join("、")}`);
+                            }
+                        }
                         if (hwLogs.length > 0) {
                             const term = streamingRoot.querySelector(".streaming-hw-log");
                             if (term) {
@@ -825,7 +848,8 @@ async function sendMessage() {
                             }
                         }
 
-                        showRoundTiming(streamingRoot, roundStart, null, data.timing || null);
+                        const statusLabel = data.status === "success" ? null : data.status;
+                        showRoundTiming(streamingRoot, roundStart, statusLabel, data.timing || null);
                     } else if (data.type === "error") {
                         cancelBubbleRaf();
                         bubbleEl.innerHTML = escapeHtml(`Error: ${data.message || "Unknown error"}`).replace(/\n/g, "<br>");

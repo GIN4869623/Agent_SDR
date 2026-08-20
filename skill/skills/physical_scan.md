@@ -11,6 +11,13 @@ trigger_keywords:
   - 噪声
   - 测量
   - scan
+exclude_patterns:
+  - "(干净|最优|最佳|最低|最小).{0,8}(信道|频点|频段|频带)"
+tool_names:
+  - perform_physical_scan
+workflow: atomic
+required_actions:
+  - scan_spectrum
 ---
 
 # 频谱扫描
@@ -26,3 +33,8 @@ trigger_keywords:
 ## 执行规则
 - 如果用户没有指定频率，使用默认值 2.4 GHz。
 - 只打开 RX 接收链路，不发射信号。
+- 只用于测量或查看频谱；如果还要选择干净频点后发送或可视化，应使用认知选频技能。
+
+## 示例
+- 应使用："扫描 2.4 GHz 附近的底噪"、"测量这个频点的接收功率"。
+- 不应使用："找底噪最低的频点并发送你好"、"什么是频谱扫描"。

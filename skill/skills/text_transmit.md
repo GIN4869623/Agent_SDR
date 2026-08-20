@@ -15,6 +15,11 @@ trigger_keywords:
   - qpsk
 exclude_patterns:
   - "自适应|根据.{0,5}snr|自动选择|干净.{0,3}(信道|频点)|最优.{0,3}(频点|信道)|认知"
+tool_names:
+  - text_fsk_send_and_receive
+workflow: atomic
+required_actions:
+  - transmit_text
 ---
 
 # 固定调制文本收发

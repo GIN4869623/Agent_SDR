@@ -531,6 +531,7 @@ class SDRAgentService:
                 "当前请求已被系统判定为明确硬件执行动作。"
                 "第一步必须调用最小必要的硬件技能，禁止跳过技能直接回答，"
                 "也不要调用知识检索工具。"
+                
             )
         if route == "knowledge":
             return (

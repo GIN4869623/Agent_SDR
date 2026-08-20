@@ -10,6 +10,12 @@ trigger_keywords:
   - vlc
   - gnu radio
   - gnuradio
+tool_names:
+  - start_video_stream
+  - stop_video_stream
+  - video_stream_status
+workflow: subcommand
+required_actions: []
 ---
 
 # BPSK 视频流传输
@@ -26,3 +32,7 @@ trigger_keywords:
 - 启动视频流会运行 `/usr/bin/python3 -u /home/njupt/Desktop/VIDEO/bpsk_video_stream.py`
 - GNU Radio Qt 窗口和 VLC 播放器会自动打开。
 - 视频流是后台子进程，通过 PID 文件 `/tmp/sdr_video_stream.pid` 管理状态。
+
+## 使用边界
+- 这是一个包含三个工具的子命令工作流，但一次用户请求只开放与“启动/停止/状态”对应的当前工具。
+- 询问视频传输原理或 BPSK 原理时不执行本技能，应进入知识问答路由。

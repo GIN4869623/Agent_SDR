@@ -12,6 +12,13 @@ trigger_keywords:
   - 波形
   - 频谱
   - 显示
+exclude_patterns:
+  - "(干净|最优|最佳).{0,8}(信道|频点|频段|频带)"
+tool_names:
+  - tone_loopback_visualize
+workflow: atomic
+required_actions:
+  - visualize_tone
 ---
 
 # Tone 可视化
@@ -27,3 +34,7 @@ trigger_keywords:
 - 从用户指令中提取频率参数。
 - 如果用户没有指定，使用默认值。
 - 这是个持续运行的后台任务，会阻塞 USRP 直到手动停止。
+
+## 示例
+- 应使用："显示 100 kHz Tone 波形"、"启动正弦波频谱可视化"。
+- 不应使用："找一个干净频点后显示 Tone"、"什么是 FFT 频谱"。

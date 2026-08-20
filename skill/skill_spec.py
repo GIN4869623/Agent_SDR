@@ -34,6 +34,9 @@ class SkillSpec:
     trigger_patterns: list[str] = field(default_factory=list)   # Regex patterns for matching
     trigger_keywords: list[str] = field(default_factory=list)   # Keywords for confidence boost
     exclude_patterns: list[str] = field(default_factory=list)   # Patterns that disqualify this skill
+    tool_names: list[str] = field(default_factory=list)          # Tools owned by this skill/workflow
+    workflow: str = "atomic"                                   # atomic / subcommand / fallback
+    required_actions: list[str] = field(default_factory=list)   # Business effects required for completion
 
     # ── matching ──
 
@@ -178,6 +181,9 @@ def load_skill_from_md(
     trigger_patterns = metadata.get("trigger_patterns", [])
     trigger_keywords = metadata.get("trigger_keywords", [])
     exclude_patterns = metadata.get("exclude_patterns", [])
+    tool_names = metadata.get("tool_names", [])
+    workflow = metadata.get("workflow", "atomic")
+    required_actions = metadata.get("required_actions", [])
 
     # Body is the system_prompt (strip leading heading and blank lines)
     system_prompt = _strip_markdown_heading(body)
@@ -197,6 +203,9 @@ def load_skill_from_md(
         trigger_patterns=trigger_patterns,
         trigger_keywords=trigger_keywords,
         exclude_patterns=exclude_patterns,
+        tool_names=tool_names or [name],
+        workflow=workflow,
+        required_actions=required_actions,
     )
 
 

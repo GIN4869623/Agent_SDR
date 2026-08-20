@@ -12,6 +12,11 @@ trigger_keywords:
   - stop
 exclude_patterns:
   - "(视频流|video\\.stream|video_stream|gnu\\.radio|vlc)"
+tool_names:
+  - stop_hardware_task
+workflow: atomic
+required_actions:
+  - stop_hardware
 ---
 
 # 停止硬件任务
