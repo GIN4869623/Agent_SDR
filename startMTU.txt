@@ -1,2 +1,0 @@
-sudo ip link set dev enP7s7 mtu 9000
-ip link show enP7s7 | grep mtu
