@@ -1,6 +1,5 @@
 """MCP Server — single source of truth for all SDR tools, resources, and prompts.
 
-This module replaces the old tools/ directory and mcp_server/sdr_server.py.
 Tools are defined once here; the Agent Loop uses them via `get_tools()` /
 `call_tool()`, and external agents consume them via SSE or stdio transport.
 
@@ -151,7 +150,7 @@ def create_sdr_mcp(
         def decorator(fn):
             # Register with FastMCP (for external agents via SSE/stdio)
             mcp_tool = mcp.tool(name=name, description=description)(fn)
-            # Register with ToolRegistry (for internal Agent Loop)
+            # Register with MCPToolRegistry (for the internal Agent Loop)
             registry.register(
                 ToolDef(
                     name=name,

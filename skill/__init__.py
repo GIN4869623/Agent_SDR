@@ -1,9 +1,4 @@
-"""Skill definitions for the SDR control platform (Approach A).
-
-Each skill wraps an existing ToolSpec with matching metadata and a system prompt.
-The SkillRegistry is used by the LangGraph supervisor node to match user intent
-to skills via regex, with LLM function calling kept as a fallback.
-"""
+"""Skill matching and prompt metadata for the current Agent Loop."""
 
 from __future__ import annotations
 

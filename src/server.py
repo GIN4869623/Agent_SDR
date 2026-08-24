@@ -32,7 +32,7 @@ from src.config import settings
 from src.mcp import create_sdr_mcp
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Bootstrap — same as old main.py
+# Bootstrap
 # ═══════════════════════════════════════════════════════════════════════════
 
 from core.memory import ConversationMemory
@@ -63,7 +63,7 @@ mcp_server, tool_registry = create_sdr_mcp(
 # Create skill registry
 from src.skills.registry import create_skill_registry
 
-skill_registry = create_skill_registry(controller, video_controller, knowledge_base)
+skill_registry = create_skill_registry()
 trace_store = RunTraceStore(
     settings.agent_trace_path,
     enabled=settings.agent_trace_enabled,

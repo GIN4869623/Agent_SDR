@@ -90,9 +90,8 @@ Agent_SDR/
 ├── hardware/                   # 硬件控制层（USRP, 视频流）
 ├── core/                       # 领域层（记忆, RAG 向量检索）
 ├── skill/                      # 技能定义（.md 文件 + 匹配引擎）
-├── tools/                      # [废弃] Pydantic 模型保留给 skill 兼容
-├── mcp_server/                 # [废弃] 旧 MCP server，已迁移到 src/mcp/
-├── graph/                      # [废弃] 旧 LangGraph，已替换为 Agent Loop
+├── scripts/
+│   └── evaluate_model_compatibility.py # 真实模型 + 模拟工具兼容性评测
 ├── static/                     # 前端
 ├── data/                       # 知识库文档
 └── .env.example
@@ -108,7 +107,7 @@ Agent_SDR/
 
 - `.env.example`
   功能：环境变量模板，集中放模型地址、API Key、USRP IP 等参数示例。
-  用法：复制为 `.env` 后再修改实际参数，`config/settings.py` 会在启动时自动读取。
+  用法：复制为 `.env` 后再修改实际参数，`src/config.py` 会在启动时自动读取。
 
 - `.gitignore`
   功能：忽略虚拟环境、缓存文件和本地敏感配置。
@@ -119,50 +118,32 @@ Agent_SDR/
   用法：部署或初始化开发环境时执行 `pip install -r requirements.txt`。
 
 - `requirements-optional.txt`
-  功能：后续扩展依赖，预留给 LangChain、LangGraph 等可选方案。
-  用法：只有在你准备接入 LangGraph、LangChain 时再安装。
+  功能：PDF 知识库导入脚本使用的可选依赖。
+  用法：需要运行 `scripts/import_pdf_to_kb.py` 时安装。
 
 - `README.md`
   功能：项目说明文档。
   用法：开发前先读这里，确认目录职责、启动方式和改动入口。
 
-### `config/`
+### `src/`
 
-- `config/`
-  功能：配置目录，集中管理环境变量和默认参数。
-  用法：凡是模型名、USRP IP、静态目录、知识库目录之类的全局参数，优先放在这里，而不是写死在业务代码里。
+- `src/config.py`
+  功能：当前唯一配置入口，读取 `.env` 并导出模型、Agent、知识库和日志配置。
+  用法：修改模型地址、模型名、默认温度、会话长度或日志路径时改这里。
 
-- `config/settings.py`
-  功能：定义 `Settings` 配置模型，读取 `.env`，并导出全局 `settings`。
-  用法：修改模型地址、默认模型名、会话长度、知识库目录时，主要改这个文件。
+- `src/prompts.py`
+  功能：当前 Agent Loop 使用的全局系统提示词和 Skill 注入模板。
+  用法：优化全局角色、工具使用原则和回答风格时改这里；单项业务规则改对应 Skill。
 
-- `config/__init__.py`
-  功能：将 `config` 标记为 Python 包。
-  用法：一般不需要改。
-
-### `prompts/`
-
-- `prompts/`
-  功能：提示词目录，专门放系统提示词和提示词拼接逻辑。
-  用法：如果你要优化工具调用规则、角色约束、输出风格，不要去改硬件控制器，直接改这里。
-
-- `prompts/system_prompts.py`
-  功能：定义结构化系统提示词，包含 Role、Constraints、Workflow、Tools Logic。
-  用法：当模型出现幻觉、工具选择不准、回复风格不合适时，优先修改这个文件。
-
-- `prompts/__init__.py`
-  功能：包初始化文件。
-  用法：一般不需要改。
+- `src/mcp/__init__.py`
+  功能：MCP 工具 Schema 与执行器的唯一来源，同时服务内部 Agent Loop 和外部 MCP 客户端。
+  用法：新增或修改可执行工具时改这里。
 
 ### `core/`
 
 - `core/`
-  功能：核心编排层，处理 Agent 对话、会话记忆和本地知识检索。
-  用法：凡是“模型怎么思考、怎么调工具、怎么管理上下文”的问题，都归这里。
-
-- `core/agent.py`
-  功能：Agent 服务主逻辑，负责调用 OpenAI 兼容接口、处理 tool calls、保存会话历史。
-  用法：如果你要把当前方案替换成 LangChain / LangGraph，主要从这个文件下手。
+  功能：领域服务层，处理会话记忆、本地知识检索、embedding 和联网搜索。
+  用法：Agent 编排已经迁移到 `src/agent/`，这里不再包含 Agent 主循环。
 
 - `core/memory.py`
   功能：管理多会话上下文，按 `session_id` 存取历史消息。
@@ -191,33 +172,21 @@ Agent_SDR/
 
 - `hardware/sdr_controller.py`
   功能：核心硬件控制器，封装 USRP 连接、硬件状态、扫频、文本收发、自适应调制、最优频点搜索、Tone 可视化等逻辑。
-  用法：新增新的物理层实验技能时，先在这里实现底层函数，再到 `tools/` 暴露给 Agent。
+  用法：新增物理层实验时先实现底层函数，再到 `src/mcp/` 暴露给 Agent。
 
 - `hardware/__init__.py`
   功能：包初始化文件。
   用法：一般不需要改。
 
-### `tools/`
+### `skill/`
 
-- `tools/`
-  功能：技能定义层，把硬件函数和知识检索函数包装成可被模型调用的工具。
-  用法：新增一个新技能时，通常要同时改 `hardware/` 或 `core/rag.py`，再在这里注册对应工具。
+- `skill/skill_spec.py`
+  功能：定义纯 Skill 元数据和匹配器，不包含工具处理函数。
+  用法：调整匹配评分机制时改这里。
 
-- `tools/__init__.py`
-  功能：定义 `ToolInput`、`ToolSpec`、`ToolRegistry`，统一做 Pydantic 参数校验和 OpenAI 工具格式转换。
-  用法：如果要改工具注册机制、工具 schema 生成方式、工具执行入口，改这里。
-
-- `tools/physical_tools.py`
-  功能：定义物理层技能，例如扫频、Tone、停止硬件任务。
-  用法：凡是“设备控制类”的技能，优先放这里。
-
-- `tools/transmit_tools.py`
-  功能：定义发射和链路类技能，例如固定调制文本收发、自适应调制收发与解调、最优频点发送。
-  用法：凡是“发什么、怎么发、按什么调制发”的技能，优先放这里。
-
-- `tools/knowledge_tools.py`
-  功能：定义知识检索技能 `search_sdr_knowledge`。
-  用法：如果你要加更多知识型工具，比如“生成实验总结”“查硬件说明书”，可以先参考这个文件的写法。
+- `skill/skills/*.md`
+  功能：定义意图触发规则、任务提示词、工作流和完成动作。
+  用法：修改某项业务的参数提取与执行指南时改对应 Markdown 文件。
 
 ### `data/`
 
@@ -258,12 +227,13 @@ Agent_SDR/
 
 ## 常见开发入口
 
-- 想改模型地址、模型名、USRP IP：改 `config/settings.py` 或 `.env`。
-- 想改 Agent 的角色、工具调用规则、回答风格：改 `prompts/system_prompts.py`。
-- 想把 OpenAI 兼容调用换成 LangGraph：重点改 `core/agent.py`。
+- 想改模型地址、模型名、USRP IP：改 `src/config.py` 或 `.env`。
+- 想改 Agent 的角色、全局工具规则、回答风格：改 `src/prompts.py`。
+- 想改 Agent 编排与循环：改 `src/agent/loop.py`、`src/agent/router.py`。
 - 想调整知识库分块 / embedding / 向量检索：改 `core/rag.py`、`core/embeddings.py`。
-- 想新增一个硬件实验能力：先改 `hardware/sdr_controller.py`，再到 `tools/` 暴露成工具。
-- 想新增一个知识型工具：优先改 `tools/knowledge_tools.py`，必要时配合 `core/rag.py`。
+- 想新增一个硬件实验能力：先改 `hardware/sdr_controller.py`，再到 `src/mcp/` 暴露成工具，并补充 Skill。
+- 想新增一个知识型工具：改 `src/mcp/__init__.py`，必要时配合 `core/rag.py`。
+- 想评测本地模型兼容性：运行 `scripts/evaluate_model_compatibility.py`，评测使用模拟工具，不操作硬件。
 - 想改网页布局和交互：改 `static/index.html`、`static/css/app.css`、`static/js/app.js`。
 
 ## 运行方式
@@ -323,19 +293,6 @@ python -m src.cli
   - ...
 ```
 
-## 架构迁移对照
-
-| 旧模块 | 新模块 | 说明 |
-|--------|--------|------|
-| `core/agent.py` (1700行) | `src/agent/loop.py` (200行) | 路由判断+正则提取 → 技能匹配+LLM自主决策 |
-| `graph/` (LangGraph) | `src/agent/loop.py` | 4节点图 → 简洁循环 |
-| `tools/` (ToolRegistry) | `src/mcp/__init__.py` (MCPToolRegistry) | 工具只定义一次 |
-| `mcp_server/sdr_server.py` | `src/mcp/__init__.py` | MCP 成为核心而非外挂 |
-| `config/settings.py` | `src/config.py` | 统一配置入口 |
-| `prompts/` | `src/prompts.py` | 提示词管理 |
-| `core/rag.py`（百炼云端 RAG 应用） | `core/rag.py` + `core/embeddings.py` | 云端托管 RAG → 本地 FAISS 向量检索 |
-| 无 | `src/cli.py` | 新增: stdio 模式暴露给外部 Agent |
-
 ## 开发入口（新架构）
 
 - 想新增 MCP 工具：改 `src/mcp/__init__.py` → `_register()` 装饰器
@@ -350,7 +307,7 @@ python -m src.cli
 1. `uhd` 一般不是通过 `pip` 安装，需要按 USRP/UHD 官方流程单独安装 Python 绑定。
 2. 知识库采用「本地 FAISS 向量检索 + 云端 embedding（百炼 `qwen3.7-text-embedding`）」方案：embedding 只在构建索引/资料变更时调用（一次性按 token 计费），查询时检索全程本地、零云端检索开销。
 3. 当前 Agent 默认仍走 OpenAI 兼容接口，`OLLAMA_BASE_URL` 保持了你原项目的兼容模式。
-4. 旧代码 (`core/agent.py`, `graph/`, `mcp_server/`, `tools/ToolRegistry`) 已标记为废弃，新功能请在 `src/` 下开发。
+4. 项目只保留当前 Agent Loop 架构；Agent 与工具相关的新功能请在 `src/` 和 `skill/` 下开发。
 
 ## 演示视频
 

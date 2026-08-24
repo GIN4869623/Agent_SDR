@@ -1,0 +1,782 @@
+{
+  "schema_version": 1,
+  "base_url": "http://192.168.1.109:11434/v1",
+  "safe_mock_tools": true,
+  "repetitions": 1,
+  "models": [
+    {
+      "mode": "think",
+      "model": "qwen3.5:122b",
+      "protocol_compatible": true,
+      "score": 98.75,
+      "pass_rate": 0.875,
+      "grade": "高度兼容",
+      "results": [
+        {
+          "score": 100.0,
+          "passed": true,
+          "checks": {
+            "protocol": true,
+            "tool_sequence": true,
+            "arguments": true,
+            "task_status": true,
+            "reply_present": true,
+            "result_grounding": true
+          },
+          "expected_tools": [],
+          "actual_tools": [],
+          "argument_checks": [],
+          "expected_status": "success",
+          "actual_status": "success",
+          "termination_reason": "final_response",
+          "diagnosis": {
+            "stage": "completed",
+            "diagnosis_code": "task_completed",
+            "suspected_component": null,
+            "retryable": false,
+            "summary": "路由、工作流、工具执行和最终回复均满足当前完成条件。",
+            "suggested_files": []
+          },
+          "reply": "我是 Agent SDR 智能控制中枢，专门协助你完成基于 USRP X300 设备的软件无线电物理层实验、频谱分析及无线通信验证。",
+          "timing": {
+            "total_ms": 59894.33,
+            "pre_agent_ms": 0.0,
+            "route": "chat",
+            "memory_read_ms": 0.0,
+            "route_ms": 0.02,
+            "plan_build_ms": 0.0,
+            "context_build_ms": 0.0,
+            "llm_total_ms": 59889.29,
+            "llm_stream_wall_ms": 59894.17,
+            "stream_delivery_ms": 4.88,
+            "knowledge_lookup_ms": 0,
+            "tool_decision_ms": 0,
+            "tool_execution_ms": 0,
+            "hardware_execution_ms": 0.0,
+            "final_reply_ms": 59889.29,
+            "first_token_ms": 58366.91,
+            "agent_overhead_ms": 0.16,
+            "tool_count": 0,
+            "tool_calls": [],
+            "turns": 1
+          },
+          "case_id": "chat_no_tool",
+          "title": "普通对话不调用工具",
+          "instruction": "你好，请用一句话介绍你自己。",
+          "elapsed_ms": 59895.67,
+          "repetition": 1
+        },
+        {
+          "score": 100.0,
+          "passed": true,
+          "checks": {
+            "protocol": true,
+            "tool_sequence": true,
+            "arguments": true,
+            "task_status": true,
+            "reply_present": true,
+            "result_grounding": true
+          },
+          "expected_tools": [
+            "perform_physical_scan"
+          ],
+          "actual_tools": [
+            "perform_physical_scan"
+          ],
+          "argument_checks": [
+            {
+              "expected": {
+                "center_freq_hz": 2450000000.0,
+                "bandwidth_hz": 2000000.0
+              },
+              "actual": {
+                "center_freq_hz": 2450000000,
+                "bandwidth_hz": 2000000,
+                "duration_s": 0.2,
+                "chan": 0
+              },
+              "fields": {
+                "center_freq_hz": true,
+                "bandwidth_hz": true
+              }
+            }
+          ],
+          "expected_status": "success",
+          "actual_status": "success",
+          "termination_reason": "final_response",
+          "diagnosis": {
+            "stage": "completed",
+            "diagnosis_code": "task_completed",
+            "suspected_component": null,
+            "retryable": false,
+            "summary": "路由、工作流、工具执行和最终回复均满足当前完成条件。",
+            "suggested_files": []
+          },
+          "reply": "扫描完成。在 2.45 GHz 中心频率、2 MHz 带宽下，测得接收功率为 -73.25 dBm。该频点底噪水平正常，可用于后续实验。",
+          "timing": {
+            "total_ms": 20214.76,
+            "pre_agent_ms": 0.0,
+            "route": "hardware",
+            "memory_read_ms": 0.0,
+            "route_ms": 0.03,
+            "plan_build_ms": 2.11,
+            "context_build_ms": 0.01,
+            "llm_total_ms": 20209.89,
+            "llm_stream_wall_ms": 20211.97,
+            "stream_delivery_ms": 2.08,
+            "knowledge_lookup_ms": 0,
+            "tool_decision_ms": 11746.13,
+            "tool_execution_ms": 0.02,
+            "hardware_execution_ms": 0.02,
+            "final_reply_ms": 8463.76,
+            "first_token_ms": 6409.06,
+            "agent_overhead_ms": 2.77,
+            "tool_count": 1,
+            "tool_calls": [
+              {
+                "turn": 1,
+                "call_index": 1,
+                "name": "perform_physical_scan",
+                "args": {
+                  "center_freq_hz": 2450000000,
+                  "bandwidth_hz": 2000000,
+                  "duration_s": 0.2,
+                  "chan": 0
+                },
+                "status": "success",
+                "execution_status": "success",
+                "decision_valid": true,
+                "elapsed_ms": 0.02,
+                "completed_actions": [
+                  "scan_spectrum"
+                ],
+                "rejected": false,
+                "error": null
+              }
+            ],
+            "turns": 2
+          },
+          "case_id": "scan_frequency_units",
+          "title": "扫频工具与单位换算",
+          "instruction": "请扫描 2.45 GHz 附近 2 MHz 带宽的底噪。",
+          "elapsed_ms": 20215.65,
+          "repetition": 1
+        },
+        {
+          "score": 100.0,
+          "passed": true,
+          "checks": {
+            "protocol": true,
+            "tool_sequence": true,
+            "arguments": true,
+            "task_status": true,
+            "reply_present": true,
+            "result_grounding": true
+          },
+          "expected_tools": [
+            "text_fsk_send_and_receive"
+          ],
+          "actual_tools": [
+            "text_fsk_send_and_receive"
+          ],
+          "argument_checks": [
+            {
+              "expected": {
+                "text": "兼容性测试",
+                "modulation_scheme": "QPSK",
+                "center_freq_hz": 2450000000.0,
+                "tx_gain": 25.0,
+                "rx_gain": 25.0
+              },
+              "actual": {
+                "text": "兼容性测试",
+                "modulation_scheme": "QPSK",
+                "center_freq_hz": 2450000000,
+                "samp_rate": 1000000,
+                "sym_rate": 10000,
+                "f_dev": 25000,
+                "tx_gain": 25,
+                "rx_gain": 25,
+                "amp": 0.6,
+                "packet_repetitions": 3
+              },
+              "fields": {
+                "text": true,
+                "modulation_scheme": true,
+                "center_freq_hz": true,
+                "tx_gain": true,
+                "rx_gain": true
+              }
+            }
+          ],
+          "expected_status": "success",
+          "actual_status": "success",
+          "termination_reason": "final_response",
+          "diagnosis": {
+            "stage": "completed",
+            "diagnosis_code": "task_completed",
+            "suspected_component": null,
+            "retryable": false,
+            "summary": "路由、工作流、工具执行和最终回复均满足当前完成条件。",
+            "suggested_files": []
+          },
+          "reply": "实验已成功完成。在 2.45 GHz 频率下使用 QPSK 调制发送了文本“兼容性测试”，收发增益均设置为 25 dB。接收端成功解码，还原的文本为“兼容性测试”，链路通信正常。",
+          "timing": {
+            "total_ms": 30314.58,
+            "pre_agent_ms": 0.0,
+            "route": "hardware",
+            "memory_read_ms": 0.0,
+            "route_ms": 0.02,
+            "plan_build_ms": 0.08,
+            "context_build_ms": 0.01,
+            "llm_total_ms": 30310.36,
+            "llm_stream_wall_ms": 30313.86,
+            "stream_delivery_ms": 3.5,
+            "knowledge_lookup_ms": 0,
+            "tool_decision_ms": 20699.38,
+            "tool_execution_ms": 0.02,
+            "hardware_execution_ms": 0.02,
+            "final_reply_ms": 9610.98,
+            "first_token_ms": 7263.21,
+            "agent_overhead_ms": 0.7,
+            "tool_count": 1,
+            "tool_calls": [
+              {
+                "turn": 1,
+                "call_index": 1,
+                "name": "text_fsk_send_and_receive",
+                "args": {
+                  "text": "兼容性测试",
+                  "modulation_scheme": "QPSK",
+                  "center_freq_hz": 2450000000,
+                  "samp_rate": 1000000,
+                  "sym_rate": 10000,
+                  "f_dev": 25000,
+                  "tx_gain": 25,
+                  "rx_gain": 25,
+                  "amp": 0.6,
+                  "packet_repetitions": 3
+                },
+                "status": "success",
+                "execution_status": "success",
+                "decision_valid": true,
+                "elapsed_ms": 0.02,
+                "completed_actions": [
+                  "transmit_text"
+                ],
+                "rejected": false,
+                "error": null
+              }
+            ],
+            "turns": 2
+          },
+          "case_id": "fixed_qpsk_parameters",
+          "title": "中文文本与QPSK参数提取",
+          "instruction": "在 2.45 GHz 用 QPSK 发送“兼容性测试”，收发增益都设为 25 dB。",
+          "elapsed_ms": 30315.49,
+          "repetition": 1
+        },
+        {
+          "score": 100.0,
+          "passed": true,
+          "checks": {
+            "protocol": true,
+            "tool_sequence": true,
+            "arguments": true,
+            "task_status": true,
+            "reply_present": true,
+            "result_grounding": true
+          },
+          "expected_tools": [
+            "adaptive_modulation_transmit"
+          ],
+          "actual_tools": [
+            "adaptive_modulation_transmit"
+          ],
+          "argument_checks": [
+            {
+              "expected": {
+                "text": "链路评测",
+                "center_freq_hz": 2420000000.0
+              },
+              "actual": {
+                "text": "链路评测",
+                "center_freq_hz": 2420000000,
+                "probe_text": "channel_probe"
+              },
+              "fields": {
+                "text": true,
+                "center_freq_hz": true
+              }
+            }
+          ],
+          "expected_status": "success",
+          "actual_status": "success",
+          "termination_reason": "final_response",
+          "diagnosis": {
+            "stage": "completed",
+            "diagnosis_code": "task_completed",
+            "suspected_component": null,
+            "retryable": false,
+            "summary": "路由、工作流、工具执行和最终回复均满足当前完成条件。",
+            "suggested_files": []
+          },
+          "reply": "在 2.42 GHz 频率上完成自适应调制传输实验。信道探测结果显示信噪比（SNR）为 12.5 dB，系统自动选择 QPSK 调制方式发送文本“链路评测”。接收端成功解码，传输验证通过。",
+          "timing": {
+            "total_ms": 28158.11,
+            "pre_agent_ms": 0.0,
+            "route": "hardware",
+            "memory_read_ms": 0.0,
+            "route_ms": 0.03,
+            "plan_build_ms": 0.07,
+            "context_build_ms": 0.01,
+            "llm_total_ms": 28153.34,
+            "llm_stream_wall_ms": 28157.39,
+            "stream_delivery_ms": 4.05,
+            "knowledge_lookup_ms": 0,
+            "tool_decision_ms": 11000.21,
+            "tool_execution_ms": 0.02,
+            "hardware_execution_ms": 0.02,
+            "final_reply_ms": 17153.13,
+            "first_token_ms": 14518.6,
+            "agent_overhead_ms": 0.7,
+            "tool_count": 1,
+            "tool_calls": [
+              {
+                "turn": 1,
+                "call_index": 1,
+                "name": "adaptive_modulation_transmit",
+                "args": {
+                  "text": "链路评测",
+                  "center_freq_hz": 2420000000,
+                  "probe_text": "channel_probe"
+                },
+                "status": "success",
+                "execution_status": "success",
+                "decision_valid": true,
+                "elapsed_ms": 0.02,
+                "completed_actions": [
+                  "probe_link",
+                  "select_modulation",
+                  "transmit_text"
+                ],
+                "rejected": false,
+                "error": null
+              }
+            ],
+            "turns": 2
+          },
+          "case_id": "adaptive_transmit",
+          "title": "自适应调制意图",
+          "instruction": "请在 2.42 GHz 根据信道 SNR 自动选择调制方式发送“链路评测”。",
+          "elapsed_ms": 28159.01,
+          "repetition": 1
+        },
+        {
+          "score": 100.0,
+          "passed": true,
+          "checks": {
+            "protocol": true,
+            "tool_sequence": true,
+            "arguments": true,
+            "task_status": true,
+            "reply_present": true,
+            "result_grounding": true
+          },
+          "expected_tools": [
+            "auto_optimal_transmit"
+          ],
+          "actual_tools": [
+            "auto_optimal_transmit"
+          ],
+          "argument_checks": [
+            {
+              "expected": {
+                "text": "",
+                "center_freq_hz": 2400000000.0,
+                "enable_tone": true,
+                "tone_freq_hz": 80000.0
+              },
+              "actual": {
+                "text": "",
+                "center_freq_hz": 2400000000,
+                "search_span_hz": 30000000,
+                "enable_tone": true,
+                "tone_freq_hz": 80000,
+                "use_adaptive_modulation": false,
+                "modulation_scheme": "2-FSK"
+              },
+              "fields": {
+                "text": true,
+                "center_freq_hz": true,
+                "enable_tone": true,
+                "tone_freq_hz": true
+              }
+            }
+          ],
+          "expected_status": "success",
+          "actual_status": "success",
+          "termination_reason": "final_response",
+          "diagnosis": {
+            "stage": "completed",
+            "diagnosis_code": "task_completed",
+            "suspected_component": null,
+            "retryable": false,
+            "summary": "路由、工作流、工具执行和最终回复均满足当前完成条件。",
+            "suggested_files": []
+          },
+          "reply": "已在 2.4 GHz 附近完成认知选频扫描，找到最干净的频点为 2.4075 GHz。80 kHz 单音频谱可视化已成功启动，当前在该频点运行。",
+          "timing": {
+            "total_ms": 29902.66,
+            "pre_agent_ms": 0.0,
+            "route": "hardware",
+            "memory_read_ms": 0.0,
+            "route_ms": 0.02,
+            "plan_build_ms": 0.07,
+            "context_build_ms": 0.01,
+            "llm_total_ms": 29898.4,
+            "llm_stream_wall_ms": 29901.96,
+            "stream_delivery_ms": 3.56,
+            "knowledge_lookup_ms": 0,
+            "tool_decision_ms": 19339.84,
+            "tool_execution_ms": 0.01,
+            "hardware_execution_ms": 0.01,
+            "final_reply_ms": 10558.56,
+            "first_token_ms": 8491.11,
+            "agent_overhead_ms": 0.69,
+            "tool_count": 1,
+            "tool_calls": [
+              {
+                "turn": 1,
+                "call_index": 1,
+                "name": "auto_optimal_transmit",
+                "args": {
+                  "text": "",
+                  "center_freq_hz": 2400000000,
+                  "search_span_hz": 30000000,
+                  "enable_tone": true,
+                  "tone_freq_hz": 80000,
+                  "use_adaptive_modulation": false,
+                  "modulation_scheme": "2-FSK"
+                },
+                "status": "success",
+                "execution_status": "success",
+                "decision_valid": true,
+                "elapsed_ms": 0.01,
+                "completed_actions": [
+                  "scan_spectrum",
+                  "select_clean_frequency",
+                  "visualize_tone"
+                ],
+                "rejected": false,
+                "error": null
+              }
+            ],
+            "turns": 2
+          },
+          "case_id": "cognitive_tone",
+          "title": "认知选频复合参数",
+          "instruction": "寻找 2.4 GHz 附近最干净的频点，并启动 80 kHz 单音频谱可视化，不要发送文本。",
+          "elapsed_ms": 29903.56,
+          "repetition": 1
+        },
+        {
+          "score": 100.0,
+          "passed": true,
+          "checks": {
+            "protocol": true,
+            "tool_sequence": true,
+            "arguments": true,
+            "task_status": true,
+            "reply_present": true,
+            "result_grounding": true
+          },
+          "expected_tools": [
+            "search_sdr_knowledge"
+          ],
+          "actual_tools": [
+            "search_sdr_knowledge"
+          ],
+          "argument_checks": [
+            {
+              "expected": {
+                "query": {
+                  "$contains": "QPSK"
+                }
+              },
+              "actual": {
+                "query": "什么是QPSK",
+                "top_k": 3
+              },
+              "fields": {
+                "query": true
+              }
+            }
+          ],
+          "expected_status": "success",
+          "actual_status": "success",
+          "termination_reason": "final_response",
+          "diagnosis": {
+            "stage": "completed",
+            "diagnosis_code": "task_completed",
+            "suspected_component": null,
+            "retryable": false,
+            "summary": "路由、工作流、工具执行和最终回复均满足当前完成条件。",
+            "suggested_files": []
+          },
+          "reply": "QPSK 是四相相移键控调制方式，每个符号携带 2 比特信息。该信息来源于知识库文档 eval_fixture.md。在 SDR 实验中，QPSK 相比 BPSK 或 2-FSK 具有更高的频谱效率，但需要更好的信噪比条件才能可靠解调。",
+          "timing": {
+            "total_ms": 17317.54,
+            "pre_agent_ms": 0.0,
+            "route": "knowledge",
+            "memory_read_ms": 0.0,
+            "route_ms": 0.02,
+            "plan_build_ms": 0.01,
+            "context_build_ms": 0.01,
+            "llm_total_ms": 17314.68,
+            "llm_stream_wall_ms": 17316.91,
+            "stream_delivery_ms": 2.23,
+            "knowledge_lookup_ms": 0.02,
+            "tool_decision_ms": 9001.35,
+            "tool_execution_ms": 0.02,
+            "hardware_execution_ms": 0.0,
+            "final_reply_ms": 8313.33,
+            "first_token_ms": 5178.72,
+            "agent_overhead_ms": 0.61,
+            "tool_count": 1,
+            "tool_calls": [
+              {
+                "turn": 1,
+                "call_index": 1,
+                "name": "search_sdr_knowledge",
+                "args": {
+                  "query": "什么是QPSK",
+                  "top_k": 3
+                },
+                "status": "success",
+                "execution_status": "success",
+                "decision_valid": true,
+                "elapsed_ms": 0.02,
+                "completed_actions": [
+                  "answer_with_knowledge"
+                ],
+                "rejected": false,
+                "error": null
+              }
+            ],
+            "turns": 2
+          },
+          "case_id": "knowledge_grounding",
+          "title": "本地知识检索与结果忠实度",
+          "instruction": "什么是 QPSK？请根据知识库回答。",
+          "elapsed_ms": 17318.42,
+          "repetition": 1
+        },
+        {
+          "score": 90.0,
+          "passed": false,
+          "checks": {
+            "protocol": true,
+            "tool_sequence": true,
+            "arguments": true,
+            "task_status": true,
+            "reply_present": true,
+            "result_grounding": false
+          },
+          "expected_tools": [
+            "search_sdr_knowledge",
+            "web_search"
+          ],
+          "actual_tools": [
+            "search_sdr_knowledge",
+            "web_search"
+          ],
+          "argument_checks": [
+            {
+              "expected": {
+                "query": {
+                  "$contains": "Zeta-SDR-17"
+                }
+              },
+              "actual": {
+                "query": "Zeta-SDR-17",
+                "top_k": 3
+              },
+              "fields": {
+                "query": true
+              }
+            },
+            {
+              "expected": {
+                "query": {
+                  "$contains": "Zeta-SDR-17"
+                }
+              },
+              "actual": {
+                "query": "Zeta-SDR-17 术语 含义",
+                "max_results": 5
+              },
+              "fields": {
+                "query": true
+              }
+            }
+          ],
+          "expected_status": "success",
+          "actual_status": "success",
+          "termination_reason": "final_response",
+          "diagnosis": {
+            "stage": "completed",
+            "diagnosis_code": "task_completed",
+            "suspected_component": null,
+            "retryable": false,
+            "summary": "路由、工作流、工具执行和最终回复均满足当前完成条件。",
+            "suggested_files": []
+          },
+          "reply": "在本地知识库和公开网络中均未找到关于 Zeta-SDR-17 的标准定义或相关记录。该术语可能属于特定实验环境下的内部代号、拼写错误，或者是非通用的自定义术语。建议检查拼写是否正确，或提供更多上下文信息以便进一步分析。如果您是指某种特定的调制方式或硬件型号，请确认名称的准确性。",
+          "timing": {
+            "total_ms": 45605.89,
+            "pre_agent_ms": 0.0,
+            "route": "knowledge",
+            "memory_read_ms": 0.0,
+            "route_ms": 0.03,
+            "plan_build_ms": 0.01,
+            "context_build_ms": 0.01,
+            "llm_total_ms": 45597.97,
+            "llm_stream_wall_ms": 45605.01,
+            "stream_delivery_ms": 7.04,
+            "knowledge_lookup_ms": 0.02,
+            "tool_decision_ms": 19720.87,
+            "tool_execution_ms": 0.02,
+            "hardware_execution_ms": 0.0,
+            "final_reply_ms": 25877.1,
+            "first_token_ms": 22470.02,
+            "agent_overhead_ms": 0.86,
+            "tool_count": 2,
+            "tool_calls": [
+              {
+                "turn": 1,
+                "call_index": 1,
+                "name": "search_sdr_knowledge",
+                "args": {
+                  "query": "Zeta-SDR-17",
+                  "top_k": 3
+                },
+                "status": "success",
+                "execution_status": "incomplete",
+                "decision_valid": true,
+                "elapsed_ms": 0.01,
+                "completed_actions": [],
+                "rejected": false,
+                "error": null
+              },
+              {
+                "turn": 2,
+                "call_index": 1,
+                "name": "web_search",
+                "args": {
+                  "query": "Zeta-SDR-17 术语 含义",
+                  "max_results": 5
+                },
+                "status": "success",
+                "execution_status": "success",
+                "decision_valid": true,
+                "elapsed_ms": 0.01,
+                "completed_actions": [
+                  "answer_with_knowledge"
+                ],
+                "rejected": false,
+                "error": null
+              }
+            ],
+            "turns": 3
+          },
+          "case_id": "knowledge_web_fallback",
+          "title": "本地未命中后的两阶段回退",
+          "instruction": "请查询罕见术语 Zeta-SDR-17 的含义。",
+          "elapsed_ms": 45606.91,
+          "repetition": 1
+        },
+        {
+          "score": 100.0,
+          "passed": true,
+          "checks": {
+            "protocol": true,
+            "tool_sequence": true,
+            "arguments": true,
+            "task_status": true,
+            "reply_present": true,
+            "result_grounding": true
+          },
+          "expected_tools": [
+            "perform_physical_scan"
+          ],
+          "actual_tools": [
+            "perform_physical_scan"
+          ],
+          "argument_checks": [],
+          "expected_status": "failed",
+          "actual_status": "failed",
+          "termination_reason": "all_tool_calls_failed",
+          "diagnosis": {
+            "stage": "tool_execution",
+            "diagnosis_code": "all_tool_calls_failed",
+            "suspected_component": "tool_mcp_or_hardware",
+            "retryable": true,
+            "summary": "工具已选定，但所有实际调用均执行失败。",
+            "suggested_files": [
+              "src/mcp/__init__.py",
+              "hardware/"
+            ]
+          },
+          "reply": "扫描失败。USRP 设备连接失败，错误代码 ERR9。请检查设备电源、USB 连接及驱动状态，确认设备已正确识别后再重试。",
+          "timing": {
+            "total_ms": 19338.49,
+            "pre_agent_ms": 0.0,
+            "route": "hardware",
+            "memory_read_ms": 0.0,
+            "route_ms": 0.02,
+            "plan_build_ms": 0.06,
+            "context_build_ms": 0.01,
+            "llm_total_ms": 19335.64,
+            "llm_stream_wall_ms": 19337.81,
+            "stream_delivery_ms": 2.17,
+            "knowledge_lookup_ms": 0,
+            "tool_decision_ms": 19335.64,
+            "tool_execution_ms": 0.01,
+            "hardware_execution_ms": 0.01,
+            "final_reply_ms": 0,
+            "first_token_ms": null,
+            "agent_overhead_ms": 0.67,
+            "tool_count": 1,
+            "tool_calls": [
+              {
+                "turn": 1,
+                "call_index": 1,
+                "name": "perform_physical_scan",
+                "args": {
+                  "center_freq_hz": 2400000000,
+                  "bandwidth_hz": 1000000,
+                  "duration_s": 0.2,
+                  "chan": 0
+                },
+                "status": "error",
+                "execution_status": "failed",
+                "decision_valid": true,
+                "elapsed_ms": 0.01,
+                "completed_actions": [],
+                "rejected": false,
+                "error": "评测模拟：USRP 连接失败，标记 ERR9。"
+              }
+            ],
+            "turns": 2
+          },
+          "case_id": "tool_error_truthfulness",
+          "title": "工具失败后如实回答",
+          "instruction": "请扫描 2.4 GHz 底噪。",
+          "elapsed_ms": 19339.34,
+          "repetition": 1
+        }
+      ]
+    }
+  ]
+}
