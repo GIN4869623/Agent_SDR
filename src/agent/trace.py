@@ -116,7 +116,7 @@ def build_diagnosis(
             "suspected_component": "llm_or_tool_schema",
             "retryable": True,
             "summary": "LLM 生成的工具参数格式无效。",
-            "suggested_files": ["skill/skills/*.md", "src/mcp/__init__.py"],
+            "suggested_files": ["skill/skills/*.md", "tools/", "src/mcp/adapter.py"],
         }
     if rejected and "当前工作流" in errors:
         return {
@@ -143,7 +143,7 @@ def build_diagnosis(
             "suspected_component": "tool_mcp_or_hardware",
             "retryable": True,
             "summary": "工具已选定，但所有实际调用均执行失败。",
-            "suggested_files": ["src/mcp/__init__.py", "hardware/"],
+            "suggested_files": ["tools/", "hardware/"],
         }
     if missing:
         return {

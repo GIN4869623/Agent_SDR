@@ -1,7 +1,7 @@
 """Skill metadata used by the current Agent Loop.
 
 Skills only describe intent matching, prompt injection and workflow metadata.
-Executable tool schemas and handlers live exclusively in :mod:`src.mcp`.
+Executable tool schemas and handlers live exclusively in :mod:`tools`.
 """
 
 from __future__ import annotations

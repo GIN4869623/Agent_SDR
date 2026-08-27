@@ -32,5 +32,5 @@ def _load_skills() -> dict[str, SkillSpec]:
 
 
 def build_all_skills() -> SkillRegistry:
-    """Build the Skill registry; execution remains in the MCP registry."""
+    """Build the Skill registry; execution remains in the ToolRegistry."""
     return SkillRegistry(list(_load_skills().values()))

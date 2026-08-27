@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -40,6 +41,40 @@ class FakeCompletions:
 class FakeLLM:
     def __init__(self, turns: list[list[object]]) -> None:
         self.chat = NS(completions=FakeCompletions(turns))
+
+
+class GatedAsyncStream:
+    """Hold the second chunk so tests can observe the first delta in flight."""
+
+    def __init__(self) -> None:
+        self.index = 0
+        self.release = asyncio.Event()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.index == 0:
+            self.index += 1
+            return text_chunk("流")
+        if self.index == 1:
+            await self.release.wait()
+            self.index += 1
+            return text_chunk("式")
+        raise StopAsyncIteration
+
+
+class FakeAsyncCompletions:
+    def __init__(self, stream: GatedAsyncStream) -> None:
+        self.stream = stream
+
+    async def create(self, **_kwargs):
+        return self.stream
+
+
+class FakeAsyncLLM:
+    def __init__(self, stream: GatedAsyncStream) -> None:
+        self.chat = NS(completions=FakeAsyncCompletions(stream))
 
 
 class FakeTools:
@@ -97,6 +132,39 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         return next(event for event in events if event["type"] == "done")
+
+    def test_agent_is_backed_by_expected_langgraph_topology(self) -> None:
+        agent = AgentLoop(FakeLLM([]), FakeTools({}), self.skills, FakeMemory())
+        graph = agent.graph.get_graph()
+        self.assertEqual(
+            set(graph.nodes),
+            {"__start__", "prepare", "call_model", "execute_tools", "finalize", "__end__"},
+        )
+        self.assertIn(("prepare", "call_model"), {(e.source, e.target) for e in graph.edges})
+
+    async def test_async_model_yields_delta_before_response_finishes(self) -> None:
+        model_stream = GatedAsyncStream()
+        agent = AgentLoop(
+            FakeAsyncLLM(model_stream), FakeTools({}), self.skills, FakeMemory()
+        )
+        events = agent.run_stream("你好", "stream-session")
+
+        with patch("src.agent.loop.report_to_console"):
+            while True:
+                event = await asyncio.wait_for(anext(events), timeout=1)
+                if event.get("type") == "delta":
+                    break
+
+            self.assertEqual(event["text"], "流")
+            self.assertFalse(model_stream.release.is_set())
+
+            model_stream.release.set()
+            remaining = [item async for item in events]
+
+        deltas = [item["text"] for item in remaining if item.get("type") == "delta"]
+        self.assertEqual(deltas, ["式"])
+        done = next(item for item in remaining if item.get("type") == "done")
+        self.assertEqual(done["reply"], "流式")
 
     async def test_hardware_success_requires_tool_effect_and_final_reply(self) -> None:
         done = await self.run_agent(

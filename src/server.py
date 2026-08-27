@@ -39,6 +39,7 @@ from core.memory import ConversationMemory
 from core.rag import LocalKnowledgeBase
 from hardware.sdr_controller import SDRController
 from hardware.video_stream_controller import VideoStreamController
+from tools.registry import create_tool_registry
 
 memory = ConversationMemory(max_messages=settings.session_history_limit)
 knowledge_base = LocalKnowledgeBase(
@@ -53,11 +54,17 @@ video_controller = VideoStreamController(
     reconnect_cb=controller.reconnect_usrp,
 )
 
-# Create MCP server + tool registry
-mcp_server, tool_registry = create_sdr_mcp(
+# Build the protocol-independent registry first. Both the local Agent and the
+# external MCP transport delegate to this exact execution boundary.
+tool_registry = create_tool_registry(
     controller=controller,
     knowledge_base=knowledge_base,
     video_controller=video_controller,
+)
+mcp_server = create_sdr_mcp(
+    tool_registry=tool_registry,
+    controller=controller,
+    knowledge_base=knowledge_base,
 )
 
 # Create skill registry
@@ -71,11 +78,11 @@ trace_store = RunTraceStore(
 )
 
 # Create agent loop
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from src.agent.loop import AgentLoop
 
-llm_client = OpenAI(
+llm_client = AsyncOpenAI(
     api_key=settings.api_key,
     base_url=settings.ollama_base_url,
 )

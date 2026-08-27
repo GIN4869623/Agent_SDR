@@ -34,6 +34,7 @@ from core.memory import ConversationMemory
 from core.rag import LocalKnowledgeBase
 from hardware.sdr_controller import SDRController
 from hardware.video_stream_controller import VideoStreamController
+from tools.registry import create_tool_registry
 
 
 async def main() -> None:
@@ -50,11 +51,15 @@ async def main() -> None:
         reconnect_cb=controller.reconnect_usrp,
     )
 
-    # Build MCP server
-    mcp_server, _tool_registry = create_sdr_mcp(
+    tool_registry = create_tool_registry(
         controller=controller,
         knowledge_base=knowledge_base,
         video_controller=video_controller,
+    )
+    mcp_server = create_sdr_mcp(
+        tool_registry=tool_registry,
+        controller=controller,
+        knowledge_base=knowledge_base,
     )
 
     # Run over stdio — FastMCP 1.28+ unified API

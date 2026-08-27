@@ -35,7 +35,8 @@ from skill.skills import build_all_skills
 from src.agent.loop import AgentLoop
 from src.agent.trace import RunTraceStore
 from src.config import settings
-from src.mcp import MCPToolRegistry, create_sdr_mcp
+from tools import ToolRegistry
+from tools.registry import create_tool_registry
 
 
 @dataclass(frozen=True)
@@ -229,20 +230,19 @@ class _SafeVideoController:
         raise RuntimeError(f"兼容性评测禁止执行真实视频方法：{name}")
 
 
-def _production_schema_registry() -> MCPToolRegistry:
+def _production_schema_registry() -> ToolRegistry:
     """Create current production schemas without constructing real hardware."""
-    _, registry = create_sdr_mcp(
+    return create_tool_registry(
         _SafeController(),
         _SafeKnowledgeBase(),
         _SafeVideoController(),
     )
-    return registry
 
 
 class MockToolRegistry:
     """Expose production schemas while returning deterministic mock results."""
 
-    def __init__(self, schema_registry: MCPToolRegistry, case: EvalCase) -> None:
+    def __init__(self, schema_registry: ToolRegistry, case: EvalCase) -> None:
         self.schema_registry = schema_registry
         self.case = case
         self.calls: list[dict[str, Any]] = []
@@ -345,7 +345,7 @@ def _score_case(
 
 async def _run_case(
     client: OpenAI,
-    schema_registry: MCPToolRegistry,
+    schema_registry: ToolRegistry,
     case: EvalCase,
     mode: str,
     temperature: float,

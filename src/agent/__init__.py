@@ -1,8 +1,5 @@
-"""Agent layer — the core agentic loop + context assembly.
+"""Agent layer: LangGraph orchestration, routing, context and tracing.
 
-Claude Code pattern:
-    Context assembly → LLM call with tools → tool execution → observe → repeat
-
-The loop is model-agnostic (any OpenAI-compatible API) and MCP-centric
-(all tools come from MCPToolRegistry).
+The public ``AgentLoop`` API remains model-agnostic. Internal graph nodes and
+external MCP calls share the protocol-independent ``ToolRegistry``.
 """

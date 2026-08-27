@@ -1151,6 +1151,7 @@ class SDRController:
         tx_stream = None
         rx_stream = None
         captured: list[np.ndarray] = []
+        rx_metadata_errors: list[str] = []
         thread: threading.Thread | None = None
         stop_rx = threading.Event()
         self._set_state(
@@ -1192,15 +1193,22 @@ class SDRController:
                 metadata = uhd.types.RXMetadata()
                 timeout_code = getattr(uhd.types.RXMetadataErrorCode, "timeout", None)
                 none_code = getattr(uhd.types.RXMetadataErrorCode, "none", None)
+                overflow_code = getattr(uhd.types.RXMetadataErrorCode, "overflow", None)
                 try:
                     rx_stream.issue_stream_cmd(cmd)
                     while not stop_rx.is_set() and not self.bg_stop_event.is_set():
                         received = rx_stream.recv(buffer, metadata, timeout=0.1)
                         error_code = getattr(metadata, "error_code", None)
-                        if received > 0 and error_code in {None, none_code}:
+                        if received > 0 and error_code in {None, none_code, overflow_code}:
                             captured.append(buffer[0][:received].copy())
+                        if overflow_code is not None and error_code == overflow_code:
+                            rx_metadata_errors.append(str(error_code))
+                            # Overflow loses some samples, but later repeated
+                            # packets can still be intact.  Keep receiving
+                            # instead of terminating before the next copy.
                             continue
                         if error_code not in {None, timeout_code, none_code}:
+                            rx_metadata_errors.append(str(error_code))
                             stop_rx.set()
                 finally:
                     self._stop_rx_stream(rx_stream)
@@ -1217,15 +1225,23 @@ class SDRController:
 
             chunk_size = 2048
             tx_samples_sent = 0
-            for idx in range(0, len(tx_iq), chunk_size):
-                if self.bg_stop_event.is_set():
-                    break
-                chunk = tx_iq[idx : idx + chunk_size]
-                if idx + chunk_size >= len(tx_iq):
-                    metadata.end_of_burst = True
+            tx_no_progress = 0
+            cursor = 0
+            while cursor < len(tx_iq) and not self.bg_stop_event.is_set():
+                chunk = tx_iq[cursor : cursor + chunk_size]
+                metadata.end_of_burst = cursor + len(chunk) >= len(tx_iq)
                 sent = int(tx_stream.send(chunk, metadata) or 0)
-                tx_samples_sent += max(0, min(sent, len(chunk)))
                 metadata.start_of_burst = False
+                if sent <= 0:
+                    tx_no_progress += 1
+                    if tx_no_progress >= 5:
+                        break
+                    time.sleep(0.01)
+                    continue
+                tx_no_progress = 0
+                accepted = min(sent, len(chunk))
+                cursor += accepted
+                tx_samples_sent += accepted
 
             if not self.bg_stop_event.is_set():
                 time.sleep(max(0.1, min(0.5, tx_time + 0.05)))
@@ -1262,6 +1278,7 @@ class SDRController:
                 rx_iq,
                 mod_scheme=mod_scheme,
                 sps=sps,
+                samp_rate=float(samp_rate),
             )
 
             return self._success(
@@ -1284,6 +1301,7 @@ class SDRController:
                 tx_samples_sent=int(tx_samples_sent),
                 tx_complete=bool(tx_samples_sent >= int(tx_iq.size)),
                 samples_per_symbol=int(sps),
+                rx_metadata_errors=rx_metadata_errors[:5],
             )
         finally:
             stop_rx.set()
@@ -1456,10 +1474,51 @@ def _symbols_from_oversampled_iq(iq: np.ndarray, sps: int, offset: int) -> np.nd
     symbols = aligned[: n_symbols * sps].reshape(n_symbols, sps).mean(axis=1)
     if symbols.size > 50_000:
         symbols = symbols[:50_000]
-    power = float(np.mean(np.abs(symbols) ** 2))
+    symbol_power = np.abs(symbols) ** 2
+    finite_power = symbol_power[np.isfinite(symbol_power)]
+    if finite_power.size == 0:
+        return np.array([], dtype=np.complex64)
+    # Repeated packets are separated by zero-valued guards.  Including those
+    # guards in the RMS estimate inflates 16-QAM constellation points and
+    # moves the fixed decision thresholds.  Estimate amplitude from active
+    # symbols only; the 5% cutoff still includes inner 16-QAM points.
+    active_floor = float(np.percentile(finite_power, 99)) * 0.05
+    active_power = finite_power[finite_power >= active_floor]
+    power = float(np.mean(active_power if active_power.size else finite_power))
     if not np.isfinite(power) or power <= 1e-12:
         return np.array([], dtype=np.complex64)
     return (symbols / np.sqrt(power)).astype(np.complex64)
+
+
+def _estimate_carrier_offset_rad_per_sample(
+    iq: np.ndarray,
+    mod_scheme: str,
+) -> float:
+    """Estimate residual carrier rotation with an M-th-power detector."""
+    samples = np.asarray(iq, dtype=np.complex64)
+    if samples.size < 3:
+        return 0.0
+    scheme = mod_scheme.upper()
+    order = 2 if scheme == "BPSK" else 4
+    power = np.abs(samples) ** 2
+    finite_power = power[np.isfinite(power)]
+    if finite_power.size == 0:
+        return 0.0
+    active_floor = float(np.percentile(finite_power, 99)) * 0.05
+    valid = (
+        np.isfinite(samples[1:])
+        & np.isfinite(samples[:-1])
+        & (power[1:] >= active_floor)
+        & (power[:-1] >= active_floor)
+    )
+    if np.count_nonzero(valid) < 16:
+        return 0.0
+    raised = samples.astype(np.complex128) ** order
+    phase_products = raised[1:] * np.conj(raised[:-1])
+    mean_product = np.sum(phase_products[valid])
+    if not np.isfinite(mean_product) or abs(mean_product) <= 1e-12:
+        return 0.0
+    return float(np.angle(mean_product) / order)
 
 
 def _remove_guard_dc(iq: np.ndarray) -> np.ndarray:
@@ -1517,6 +1576,7 @@ def decode_linear_modulated_texts_from_iq(
     iq: np.ndarray,
     mod_scheme: str,
     sps: int,
+    samp_rate: float | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     diag: dict[str, Any] = {
         "samples": int(iq.size),
@@ -1538,6 +1598,17 @@ def decode_linear_modulated_texts_from_iq(
     diag["window_after_dc"] = int(window.size)
 
     scheme = mod_scheme.upper()
+    carrier_offset = _estimate_carrier_offset_rad_per_sample(window, scheme)
+    diag["carrier_offset_rad_per_sample"] = carrier_offset
+    diag["carrier_offset_cycles_per_symbol"] = carrier_offset * float(sps) / (2.0 * np.pi)
+    if samp_rate is not None:
+        diag["estimated_cfo_hz"] = carrier_offset * float(samp_rate) / (2.0 * np.pi)
+    if carrier_offset:
+        sample_index = np.arange(window.size, dtype=np.float64)
+        window = (
+            window * np.exp(-1j * carrier_offset * sample_index)
+        ).astype(np.complex64)
+
     phase_steps = 32 if scheme == "BPSK" else 64
     diag["phase_steps"] = phase_steps
     rotations = np.exp(-1j * np.linspace(0.0, 2.0 * np.pi, phase_steps, endpoint=False))

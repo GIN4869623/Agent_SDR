@@ -1,31 +1,23 @@
-# Agent SDR — Claude Code Architecture
+# Agent SDR — LangGraph + Unified Tool Registry
 
-基于 Claude Code 的 MCP-centric 架构重构。核心理念：**MCP Server 是唯一的工具接口，
-Agent Loop 围绕 MCP 工具进行推理-执行-观察循环，Skills 按需注入提示词。**
+核心理念：**`ToolRegistry` 是唯一的工具定义、参数校验和执行边界。内部 LangGraph
+Agent 直接调用 registry，外部智能体通过 MCP 薄适配器调用同一 registry；Skills 只负责
+工作流约束和提示词。**
 
 ## 架构概览
 
 ```
-外部 Agent (Claude Code)
-        │
-        │ MCP/stdio          ┌──────────────┐
-        ▼                    │   Web UI     │
-┌──────────────┐             │  (SSE + HTTP)│
-│  MCP Server  │◄────────────┤              │
-│ (stdio模式)  │             └──────┬───────┘
-└──────────────┘                    │
-        │                           │ MCP/SSE
-        │                    ┌──────┴───────┐
-        │                    │  MCP Server  │
-        └────────────────────┤  (SSE模式)   │
-                             └──────┬───────┘
-                                    │
-                             ┌──────┴───────┐
-                             │  Agent Loop  │
-                             │ think→act→   │
-                             │ observe→loop │
-                             └──────────────┘
+Web UI ──HTTP/SSE──► LangGraph Agent ───────┐
+                    prepare → model         │
+                       ↑        ↓            ▼
+                    finalize ← tools ──► ToolRegistry ──► SDR/RAG/Web/Video
+                                             ▲
+外部 Agent ───────────── MCP adapter ─────────┘
 ```
+
+Web 服务进程中的 LangGraph Agent 与 MCP HTTP/SSE 入口持有同一个 registry 实例。
+`python -m src.cli` 的 stdio MCP 是独立进程，因此会创建自己的实例，但使用完全相同的
+工具定义和执行实现。
 
 ### 语义路由与任务完成判定
 
@@ -79,14 +71,24 @@ Agent_SDR/
 │   ├── config.py               # 统一配置
 │   ├── prompts.py              # 系统提示词
 │   ├── mcp/
-│   │   └── __init__.py         # MCP Server + MCPToolRegistry（唯一工具源）
+│   │   ├── __init__.py         # MCP 适配器导出
+│   │   └── adapter.py          # ToolRegistry → MCP 协议薄适配层
 │   ├── agent/
-│   │   ├── loop.py             # Agent 循环（think → act → observe）
+│   │   ├── loop.py             # 兼容入口与控制台事件
+│   │   ├── graph.py            # LangGraph 状态、节点和条件边
 │   │   ├── router.py           # 语义路由、Skill 工作流和任务动作判定
 │   │   ├── trace.py            # 结构化工作日志与自动诊断
 │   │   └── context.py          # 上下文组装
 │   └── skills/
 │       └── registry.py         # 技能加载（从 .md 文件）
+├── tools/                      # ★ 唯一工具定义与执行边界
+│   ├── __init__.py             # ToolSpec、Pydantic ToolInput、ToolRegistry
+│   ├── registry.py             # 统一组装硬件、知识和视频工具
+│   ├── policy.py               # USRP 频率、增益、采样率等机器约束
+│   ├── physical_tools.py       # 扫频、Tone、停止
+│   ├── transmit_tools.py       # 固定/自适应/认知发送
+│   ├── knowledge_tools.py      # 本地知识检索与联网搜索
+│   └── video_tools.py          # 视频流控制
 ├── hardware/                   # 硬件控制层（USRP, 视频流）
 ├── core/                       # 领域层（记忆, RAG 向量检索）
 ├── skill/                      # 技能定义（.md 文件 + 匹配引擎）
@@ -135,9 +137,13 @@ Agent_SDR/
   功能：当前 Agent Loop 使用的全局系统提示词和 Skill 注入模板。
   用法：优化全局角色、工具使用原则和回答风格时改这里；单项业务规则改对应 Skill。
 
-- `src/mcp/__init__.py`
-  功能：MCP 工具 Schema 与执行器的唯一来源，同时服务内部 Agent Loop 和外部 MCP 客户端。
-  用法：新增或修改可执行工具时改这里。
+- `tools/`
+  功能：工具 Schema、Pydantic 参数模型、风险元数据、Handler 和统一执行注册表的唯一来源。
+  用法：新增工具时在对应 `*_tools.py` 中定义，再由 `tools/registry.py` 组装。
+
+- `src/mcp/adapter.py`
+  功能：把现有 `ToolRegistry` 暴露给外部 MCP 客户端，不包含工具业务逻辑。
+  用法：只有调整 MCP 协议暴露、资源或 Prompt 时才修改这里。
 
 ### `core/`
 
@@ -172,7 +178,7 @@ Agent_SDR/
 
 - `hardware/sdr_controller.py`
   功能：核心硬件控制器，封装 USRP 连接、硬件状态、扫频、文本收发、自适应调制、最优频点搜索、Tone 可视化等逻辑。
-  用法：新增物理层实验时先实现底层函数，再到 `src/mcp/` 暴露给 Agent。
+  用法：新增物理层实验时先实现底层函数，再到 `tools/` 定义参数模型和 ToolSpec。
 
 - `hardware/__init__.py`
   功能：包初始化文件。
@@ -231,8 +237,8 @@ Agent_SDR/
 - 想改 Agent 的角色、全局工具规则、回答风格：改 `src/prompts.py`。
 - 想改 Agent 编排与循环：改 `src/agent/loop.py`、`src/agent/router.py`。
 - 想调整知识库分块 / embedding / 向量检索：改 `core/rag.py`、`core/embeddings.py`。
-- 想新增一个硬件实验能力：先改 `hardware/sdr_controller.py`，再到 `src/mcp/` 暴露成工具，并补充 Skill。
-- 想新增一个知识型工具：改 `src/mcp/__init__.py`，必要时配合 `core/rag.py`。
+- 想新增一个硬件实验能力：先改 `hardware/sdr_controller.py`，再到 `tools/` 定义工具并补充 Skill。
+- 想新增一个知识型工具：改 `tools/knowledge_tools.py`，必要时配合 `core/rag.py`。
 - 想评测本地模型兼容性：运行 `scripts/evaluate_model_compatibility.py`，评测使用模拟工具，不操作硬件。
 - 想改网页布局和交互：改 `static/index.html`、`static/css/app.css`、`static/js/app.js`。
 
@@ -295,7 +301,7 @@ python -m src.cli
 
 ## 开发入口（新架构）
 
-- 想新增 MCP 工具：改 `src/mcp/__init__.py` → `_register()` 装饰器
+- 想新增工具：在 `tools/` 中定义 ToolSpec 并加入 `tools/registry.py`；MCP 只在 `src/mcp/adapter.py` 增加协议签名
 - 想改 Agent 循环逻辑：改 `src/agent/loop.py`
 - 想改系统提示词：改 `src/prompts.py`
 - 想新增技能匹配：在 `skill/skills/` 创建 `.md` 文件
