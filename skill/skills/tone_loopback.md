@@ -14,6 +14,7 @@ trigger_keywords:
   - 显示
 exclude_patterns:
   - "(干净|最优|最佳).{0,8}(信道|频点|频段|频带)"
+  - "认知|搜索.{0,5}频点|选择.{0,5}频段|(底噪|噪声|干扰).{0,6}(最低|最小|最少).{0,6}(频点|信道|频段)"
 tool_names:
   - tone_loopback_visualize
 workflow: atomic

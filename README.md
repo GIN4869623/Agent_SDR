@@ -60,6 +60,36 @@ GET /api/agent/runs/{run_id}       # 某次请求的完整轨迹
 诊断字段 `stage` 会把问题定位到路由/Skill、参数校验、工具执行、循环控制、完成条件
 或最终回复阶段，并给出建议检查的文件。
 
+### 认知选频可视化
+
+在主控台下达“找底噪最低的频点”，监视窗口会自动显示搜索范围、逐点扫描进度、
+各候选频点的平均接收功率以及当前／最终最低功率频点。扫描结束后，可以点击
+“回放比较过程”或拖动步数滑条，查看逐个测量如何影响选择；展开测量表可查看数值。
+
+未连接 USRP 时，点击主控台“弹出窗口”，再点击“示例演示”。示例明确标注为
+“非实测”，不会访问硬件；也可打开 `/visualization.html?demo=1` 直接进入演示。
+实测结果保留到下一次认知扫描或服务重启，Tone 任务不会清除选频结果。
+
+图中功率是基于 IQ 幅度的相对 dB。选频仅比较平均接收功率，SNR 不参与频点排名。
+功率和频点详情显示 4 位小数，后台保留未四舍五入的功率值用于比较；图表纵轴随
+测量范围缩放，便于查看功率接近时的差异。界面会显示实际搜索跨度、步长与候选点总数。
+空接收、元数据错误和非有限功率值会被排除；没有有效测量时不执行后续发送。
+
+普通固定调制文本收发和自适应文本收发不自动弹出可视化窗口。手动打开时，完成后保留本次接收
+采样中能量最高的片段，显示 IQ / FFT 快照、工作频率、调制方式和解码状态；它不是
+连续实时数据。连续 Tone 任务仍显示实时波形和频谱。之前的认知选频记录保留为历史
+结果，可继续回放，不会覆盖当前文本任务的摘要。
+
+FFT 横轴以射频中心为参考，显示对称的频率偏移范围；中央始终标为 `0 (中心)`。
+图下注明该零点对应的射频中心频率，以及峰值的频率偏移和对应射频频率，避免将
+基带偏移误读成设备工作频率。
+
+自适应文本收发在 UHD 初始化收发流时等待配置稳定；若发生传输握手超时，会释放
+本次流、重连设备并重试初始化一次。该恢复仅发生在发送文本前，不会重放已发送的包。
+初始化失败返回 `stage=stream_initialization`，`adaptive_stage` 区分探测包与正式文本阶段；
+探测阶段的初始化错误发生在 SNR 测量前，不能据此判断信道质量。正式文本是否解码成功以
+`decoded_ok` 和 `final_result.decoded_texts` 为准。
+
 ## 项目结构
 
 ```text
@@ -69,6 +99,7 @@ Agent_SDR/
 │   ├── server.py               # FastAPI + SSE + MCP 入口
 │   ├── cli.py                  # MCP stdio 入口（给外部 Agent）
 │   ├── config.py               # 统一配置
+│   ├── llm.py                  # 本地 / DeepSeek 模型客户端
 │   ├── prompts.py              # 系统提示词
 │   ├── mcp/
 │   │   ├── __init__.py         # MCP 适配器导出
@@ -244,6 +275,48 @@ Agent_SDR/
 
 ## 运行方式
 
+### 模型配置：本地 Ollama / 云端 DeepSeek
+
+输入框上方的“本地 / 云端”按钮可切换每次请求使用的模型来源，选择会在当前浏览器保存。
+`think` / `fast` 按钮仅在选择本地时显示，切回本地会恢复之前的模式。
+云端使用 `DEEPSEEK_MODEL_THINK` 配置的默认模型。模型切换不需要重启服务。
+在项目根目录的 `.env` 中通过 `LLM_PROVIDER` 设置未保存浏览器选择时的默认来源。
+默认 `LLM_PROVIDER=local`，继续使用原有的 `OLLAMA_BASE_URL`、`API_KEY`、
+`MODEL_THINK` 和 `MODEL_FAST`，无需更改现有本地模型配置。
+
+接入 DeepSeek 时，在 `.env` 中加入或修改以下配置（不要覆盖已有硬件和知识库配置）：
+
+```dotenv
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=填入你的DeepSeek_API_Key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL_THINK=deepseek-flash
+DEEPSEEK_MODEL_FAST=deepseek-flash
+```
+
+云端默认使用 DeepSeek V4.1 Flash，API 模型标识为 `deepseek-flash`。模型 ID 参考
+[DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)。
+云端网页请求默认开启 DeepSeek 思考模式；API 客户端仍可通过 `mode=fast` 关闭思考模式。
+思考模式不使用 temperature，页面会禁用对应滑条。客户端已适配流式输出、思考模式下的
+工具选择和多轮工具调用所需的 `reasoning_content` 回传，详见
+[DeepSeek 思考模式文档](https://api-docs.deepseek.com/guides/thinking_mode/)。
+
+`DEEPSEEK_API_KEY` 只在后端读取，不下发到网页；它与本地 `API_KEY`、知识库的
+`BAILIAN_API_KEY` 独立。已在 `.env` 中预留 `DEEPSEEK_API_KEY=`，补全后重启服务即可使用。
+密钥未配置时，云端请求不可用，本地模型仍可使用。
+`/api/health` 只返回默认来源、模型名和是否配置，不返回密钥；聊天请求的 `provider`
+字段可选 `local` / `deepseek`，未传入时使用 `.env` 默认值，不修改其他会话的选择。
+
+可在配置完成后运行兼容性评测，脚本也会使用选定的模型路径：
+
+```bash
+.venv/bin/python scripts/evaluate_model_compatibility.py --mode both
+```
+
+评测会调用真实模型 API（云端按平台规则计费），工具执行使用模拟结果，不操作 USRP。
+本地和 DeepSeek 路径共用现有 LangGraph Agent、Skills 和工具注册表。
+`python -m src.cli` 仅启动 MCP 工具服务，其模型由连接它的外部客户端提供。
+
 ### 0. 构建本地知识索引（首次或资料更新后）
 
 ```bash
@@ -312,7 +385,7 @@ python -m src.cli
 
 1. `uhd` 一般不是通过 `pip` 安装，需要按 USRP/UHD 官方流程单独安装 Python 绑定。
 2. 知识库采用「本地 FAISS 向量检索 + 云端 embedding（百炼 `qwen3.7-text-embedding`）」方案：embedding 只在构建索引/资料变更时调用（一次性按 token 计费），查询时检索全程本地、零云端检索开销。
-3. 当前 Agent 默认仍走 OpenAI 兼容接口，`OLLAMA_BASE_URL` 保持了你原项目的兼容模式。
+3. Agent 默认通过 `LLM_PROVIDER=local` 使用原有 Ollama 兼容接口；设置 `LLM_PROVIDER=deepseek` 可切换到独立的 DeepSeek 云端路径，配置见上文。
 4. 项目只保留当前 Agent Loop 架构；Agent 与工具相关的新功能请在 `src/` 和 `skill/` 下开发。
 
 ## 演示视频

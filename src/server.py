@@ -18,7 +18,7 @@ import json
 import socket
 import time
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -78,22 +78,29 @@ trace_store = RunTraceStore(
 )
 
 # Create agent loop
-from openai import AsyncOpenAI
+from src.llm import create_async_llm_client, provider_catalog, provider_config
 
 from src.agent.loop import AgentLoop
 
-llm_client = AsyncOpenAI(
-    api_key=settings.api_key,
-    base_url=settings.ollama_base_url,
-)
+agent_loops: dict[str, AgentLoop] = {}
 
-agent_loop = AgentLoop(
-    llm_client=llm_client,
-    tool_registry=tool_registry,
-    skill_registry=skill_registry,
-    memory=memory,
-    trace_store=trace_store,
-)
+
+def get_agent_loop(provider: str | None = None) -> AgentLoop:
+    config = provider_config(provider, settings)
+    if config.llm_provider not in agent_loops:
+        try:
+            client = create_async_llm_client(config)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"{exc}。请补全 .env 后重启服务。") from exc
+        agent_loops[config.llm_provider] = AgentLoop(
+            llm_client=client,
+            tool_registry=tool_registry,
+            skill_registry=skill_registry,
+            memory=memory,
+            trace_store=trace_store,
+            config=config,
+        )
+    return agent_loops[config.llm_provider]
 
 # ═══════════════════════════════════════════════════════════════════════════
 # FastAPI application
@@ -116,6 +123,7 @@ class ChatRequest(BaseModel):
     instruction: str = Field(min_length=1)
     session_id: str = Field(min_length=1)
     mode: str = "think"
+    provider: Literal["local", "deepseek"] | None = None
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
 
 
@@ -146,6 +154,8 @@ def health_check() -> dict:
         "status": "ok",
         "app": settings.app_name,
         "models": settings.model_map,
+        "llm_provider": settings.llm_provider,
+        "providers": provider_catalog(settings),
         "knowledge_documents": knowledge_base.document_count,
         "uhd_available": controller.driver_available,
     }
@@ -176,7 +186,8 @@ async def stop_hardware_task() -> dict:
     video_result = video_controller.stop()
     hw_result = controller.stop_hardware_task()
     # Flush any pending console completion — the USRP is now idle
-    agent_loop._flush_pending_completion()
+    for agent in agent_loops.values():
+        agent._flush_pending_completion()
     return {"hardware": hw_result, "video_stream": video_result}
 
 
@@ -213,6 +224,7 @@ def get_agent_run(run_id: str) -> dict:
 @app.post("/api/chat")
 async def chat(payload: ChatRequest) -> dict:
     """Non-streaming chat — collects all events and returns final result."""
+    agent_loop = get_agent_loop(payload.provider)
     reply_parts: list[str] = []
     tool_logs: list[str] = []
     final_payload: dict[str, Any] = {}
@@ -308,6 +320,7 @@ async def chat(payload: ChatRequest) -> dict:
 @app.post("/api/chat/stream")
 async def chat_stream(payload: ChatRequest) -> StreamingResponse:
     """SSE streaming endpoint — token deltas, tool logs, and final payload."""
+    agent_loop = get_agent_loop(payload.provider)
 
     async def event_gen() -> AsyncIterator[str]:
         import asyncio as _asyncio

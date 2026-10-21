@@ -4,11 +4,12 @@ const RESET_URL = "/api/session/reset";
 const HARDWARE_STATUS_URL = "/api/hardware_status";
 const VISUALIZATION_URL = "/api/visualization";
 const STOP_HARDWARE_URL = "/api/hardware/stop";
-const VISUALIZATION_WINDOW_URL = "/visualization.html";
-const VISUALIZATION_EMBED_URL = "/visualization.html?embedded=1";
+const VISUALIZATION_WINDOW_URL = "/visualization.html?v=11";
+const VISUALIZATION_EMBED_URL = "/visualization.html?embedded=1&v=11";
 const VISUALIZATION_WINDOW_NAME = "sdr-visualization-window";
 const SESSION_KEY = "ai_sdr_session_id";
 const TEMPERATURE_KEY = "ai_sdr_temperature";
+const MODEL_PROVIDER_KEY = "ai_sdr_model_provider";
 const DEFAULT_TEMPERATURE = 0.20;
 const MIN_TEMPERATURE = 0.0;
 const MAX_TEMPERATURE = 2.0;
@@ -16,15 +17,19 @@ const MAX_TEMPERATURE = 2.0;
 let isSending = false;
 let conversationHistory = [];
 let currentMode = "think";
+let localModelMode = "think";
 let hardwareDiagnostics = {};
 let currentPopoverDevice = null;
 let sessionId = getOrCreateSessionId();
 let currentTemperature = getStoredTemperature();
 let configuredModelMap = {};
+let configuredModelProvider = "local";
+let configuredModelProviders = {};
 let currentActiveModel = "";
 let visualizationState = normalizeVisualizationState();
 let visualizationWindowRef = null;
 let pendingVisualizationAutoOpen = false;
+let visualizationAutoOpenBlockedByText = false;
 let lastVisualizationActivationId = 0;
 let visualizationStateInitialized = false;
 
@@ -43,7 +48,7 @@ const temperatureValue = document.getElementById("temperature-value");
 const activeModelName = document.getElementById("active-model-name");
 const activeModelHint = document.getElementById("active-model-hint");
 
-const USER_AVATAR = "assets/njupt.png";
+const USER_AVATAR = "assets/F59F55BC63E5A589FD1D35F4C8EBE7A3.jpg";
 const USER_AVATAR_FALLBACK = "https://api.iconify.design/mdi/account-circle.svg?color=%230ea5e9";
 const AI_AVATAR = "https://api.iconify.design/fluent-emoji/robot.svg";
 const THINK_TAG_PAIRS = [
@@ -95,19 +100,32 @@ function updateActiveModelUI({ modelName = null, hint = null } = {}) {
     if (modelName) currentActiveModel = String(modelName);
     const configuredModel = configuredModelMap[currentMode] || "";
     const displayName = modelName || currentActiveModel || configuredModel || "--";
+    const deepseekThinking = configuredModelProvider === "deepseek" && currentMode === "think";
+    if (temperatureSlider) {
+        temperatureSlider.disabled = deepseekThinking;
+        temperatureSlider.title = deepseekThinking ? "云端模型不使用 temperature" : "";
+    }
 
     if (activeModelName) activeModelName.textContent = displayName;
     if (!activeModelHint) return;
+    activeModelHint.hidden = false;
 
     if (hint) {
         activeModelHint.textContent = hint;
         return;
     }
 
+    const provider = configuredModelProviders[configuredModelProvider];
+    if (provider?.configured === false) {
+        activeModelHint.textContent = "";
+        activeModelHint.hidden = true;
+        return;
+    }
+
     if (modelName) {
-        activeModelHint.textContent = `实际运行: ${currentMode}`;
+        activeModelHint.textContent = configuredModelProvider === "deepseek" ? "云端" : `本地 · 实际运行: ${currentMode}`;
     } else if (configuredModel) {
-        activeModelHint.textContent = `当前模式 ${currentMode} 的配置模型`;
+        activeModelHint.textContent = configuredModelProvider === "deepseek" ? "云端" : `本地 · ${currentMode}`;
     } else {
         activeModelHint.textContent = "等待后端配置";
     }
@@ -116,21 +134,23 @@ function updateActiveModelUI({ modelName = null, hint = null } = {}) {
 function formatHz(value) {
     if (value == null || Number.isNaN(Number(value))) return "--";
     const numeric = Number(value);
-    if (Math.abs(numeric) >= 1e9) return `${(numeric / 1e9).toFixed(3)} GHz`;
-    if (Math.abs(numeric) >= 1e6) return `${(numeric / 1e6).toFixed(3)} MHz`;
-    if (Math.abs(numeric) >= 1e3) return `${(numeric / 1e3).toFixed(3)} kHz`;
-    return `${numeric.toFixed(2)} Hz`;
+    if (Math.abs(numeric) >= 1e9) return `${(numeric / 1e9).toFixed(7)} GHz`;
+    if (Math.abs(numeric) >= 1e6) return `${(numeric / 1e6).toFixed(4)} MHz`;
+    if (Math.abs(numeric) >= 1e3) return `${(numeric / 1e3).toFixed(4)} kHz`;
+    return `${numeric.toFixed(4)} Hz`;
 }
 
 function formatDb(value) {
     if (value == null || Number.isNaN(Number(value))) return "--";
-    return `${Number(value).toFixed(2)} dB`;
+    return `${Number(value).toFixed(4)} dB`;
 }
 
 function formatTaskName(task) {
     if (!task) return "--";
     const known = {
         tone_loopback: "Tone 回环",
+        text_transmit: "固定调制文本收发",
+        adaptive_transmit: "自适应文本收发",
     };
     return known[task] || String(task).replace(/_/g, " ");
 }
@@ -139,6 +159,10 @@ function normalizeVisualizationState(raw = {}) {
     return {
         active: Boolean(raw.active),
         task: raw.task ?? null,
+        task_status: raw.task_status ?? null,
+        modulation_scheme: raw.modulation_scheme ?? null,
+        decoded_ok: raw.decoded_ok ?? null,
+        captured_samples: Number(raw.captured_samples || 0),
         activation_id: Number(raw.activation_id || 0),
         frame_id: Number(raw.frame_id || 0),
         center_freq_hz: raw.center_freq_hz == null ? null : Number(raw.center_freq_hz),
@@ -153,6 +177,7 @@ function normalizeVisualizationState(raw = {}) {
         tx_samples: Number(raw.tx_samples || 0),
         rx_frames: Number(raw.rx_frames || 0),
         error: raw.error ?? null,
+        cognitive_scan: raw.cognitive_scan ?? null,
     };
 }
 
@@ -346,9 +371,43 @@ function applyStreamingHwLog(container, line) {
 }
 
 function setModelMode(mode) {
+    if (isSending || configuredModelProvider !== "local") return;
     currentMode = mode === "fast" ? "fast" : "think";
+    localModelMode = currentMode;
+    currentActiveModel = "";
     updateModeUI();
     updateActiveModelUI();
+}
+
+function setModelProvider(provider) {
+    if (isSending || !["local", "deepseek"].includes(provider)) return;
+    if (configuredModelProvider === "local") localModelMode = currentMode;
+    configuredModelProvider = provider;
+    currentMode = provider === "local" ? localModelMode : "think";
+    configuredModelMap = configuredModelProviders[provider]?.models || {};
+    currentActiveModel = "";
+    localStorage.setItem(MODEL_PROVIDER_KEY, provider);
+    updateProviderUI();
+    updateActiveModelUI();
+}
+
+function updateProviderUI() {
+    const toolbar = document.getElementById("model-toolbar");
+    if (toolbar) toolbar.setAttribute("data-provider", configuredModelProvider);
+    const localModes = document.getElementById("local-model-modes");
+    if (localModes) localModes.hidden = configuredModelProvider !== "local";
+    const temperatureControl = document.getElementById("temperature-control");
+    if (temperatureControl) temperatureControl.hidden = configuredModelProvider !== "local";
+    updateModeUI();
+    for (const provider of ["local", "deepseek"]) {
+        const button = document.getElementById(`${provider}-provider-btn`);
+        if (!button) continue;
+        button.classList.toggle("active", configuredModelProvider === provider);
+        button.setAttribute("aria-pressed", String(configuredModelProvider === provider));
+        button.disabled = isSending;
+        button.title = "";
+        button.textContent = provider === "local" ? "本地" : "云端";
+    }
 }
 
 function updateModeUI() {
@@ -356,10 +415,12 @@ function updateModeUI() {
     const fastBtn = document.getElementById("fast-mode-btn");
 
     if (thinkBtn) {
+        thinkBtn.disabled = isSending;
         thinkBtn.classList.toggle("active", currentMode === "think");
         thinkBtn.setAttribute("aria-pressed", currentMode === "think" ? "true" : "false");
     }
     if (fastBtn) {
+        fastBtn.disabled = isSending;
         fastBtn.classList.toggle("active", currentMode === "fast");
         fastBtn.setAttribute("aria-pressed", currentMode === "fast" ? "true" : "false");
     }
@@ -370,7 +431,12 @@ async function fetchHealthConfig() {
         const res = await fetch(HEALTH_URL, { cache: "no-store" });
         if (!res.ok) return;
         const data = await res.json();
-        configuredModelMap = data.models || {};
+        configuredModelProviders = data.providers || {};
+        const storedProvider = localStorage.getItem(MODEL_PROVIDER_KEY);
+        configuredModelProvider = ["local", "deepseek"].includes(storedProvider)
+            ? storedProvider : (data.llm_provider || "local");
+        configuredModelMap = configuredModelProviders[configuredModelProvider]?.models || data.models || {};
+        updateProviderUI();
         updateActiveModelUI();
     } catch (error) {
         console.error("Failed to fetch health config:", error);
@@ -432,6 +498,12 @@ function ensureVisualizationFrameLoaded() {
 }
 
 function describeVisualizationState() {
+    const scan = visualizationState.cognitive_scan;
+    if (scan?.status === "scanning") {
+        const count = scan.candidates.filter((point) => ["measured", "invalid"].includes(point.status)).length;
+        return `认知选频正在扫描：${count} / ${scan.candidates.length}，打开窗口查看逐点比较过程。`;
+    }
+    if (isPacketVisualization()) return describePacketVisualization();
     const taskName = formatTaskName(visualizationState.task);
     if (visualizationState.active && visualizationState.frame_id > 0) {
         return `任务 ${taskName} 正在推送实时波形与频谱数据。`;
@@ -439,6 +511,11 @@ function describeVisualizationState() {
     if (visualizationState.active) {
         return `任务 ${taskName} 已启动，正在等待第一帧 IQ / FFT 数据。`;
     }
+    if (scan?.status === "completed") {
+        return `上次认知选频已完成：选中 ${formatHz(scan.best_freq_hz)}（${formatDb(scan.min_power_db)}）。窗口内可查看功率对比和回放。`;
+    }
+    if (scan?.status === "stopped") return "认知选频已停止。窗口中保留已扫描的结果。";
+    if (scan?.status === "error") return `认知选频失败：${scan.error || "没有有效测量"}`;
     if (pendingVisualizationAutoOpen) {
         return "认知选频/可视化任务正在启动，可在这里停止当前硬件任务。";
     }
@@ -448,23 +525,37 @@ function describeVisualizationState() {
     return "空闲中。下达可视化命令后，前端会自动弹出监视窗口。";
 }
 
+function isPacketVisualization() {
+    return ["text_transmit", "adaptive_transmit"].includes(visualizationState.task);
+}
+
+function describePacketVisualization() {
+    const name = formatTaskName(visualizationState.task);
+    const modulation = visualizationState.modulation_scheme || "--";
+    if (visualizationState.active) return `${name}（${modulation}）正在发送和接收，完成后显示本次接收采样快照。`;
+    if (visualizationState.task_status === "error") return `${name}异常结束：${visualizationState.error || "未取得有效结果"}`;
+    const phase = visualizationState.task_status === "stopped" ? "已停止" : "已完成";
+    const decode = visualizationState.decoded_ok == null ? "" : visualizationState.decoded_ok ? "解码成功。" : "未成功解码。";
+    return `${name}（${modulation}）${phase}。${decode}${hasVisualizationFrameData() ? "IQ / FFT 显示本次接收数据中能量最高片段的快照。" : "本次没有可显示的有效 IQ / FFT 采样。"}`;
+}
+
 function isVisualizationTriggerLog(line) {
     const text = String(line || "");
     return (
         text.includes("tone_loopback_visualize") ||
-        (
-            text.includes("auto_optimal_transmit") &&
-            (
-                text.includes("enable_tone") ||
-                text.includes("tone_freq_hz") ||
-                /Tone|tone|正弦|单音/.test(text)
-            )
-        ) ||
-        (
-            text.includes("auto_optimal_transmit") &&
-            /可视化|框图|认知|干净信道|最优信道|干净频点|最优频点/.test(text)
-        )
+        text.includes("auto_optimal_transmit")
     );
+}
+
+function handleVisualizationToolCall(name, args = {}) {
+    if (["text_fsk_send_and_receive", "adaptive_modulation_transmit"].includes(name)
+        || (name === "auto_optimal_transmit" && args.text && !args.enable_tone)) {
+        visualizationAutoOpenBlockedByText = true;
+        pendingVisualizationAutoOpen = false;
+    } else if (["tone_loopback_visualize", "auto_optimal_transmit"].includes(name)) {
+        visualizationAutoOpenBlockedByText = false;
+        pendingVisualizationAutoOpen = true;
+    }
 }
 
 function hasVisualizationFrameData() {
@@ -539,26 +630,28 @@ function updateVisualizationStopButtons({ disabled, label }) {
 
 function updateVisualizationPanel() {
     const active = Boolean(visualizationState.active);
+    const scan = !active && !isPacketVisualization() && visualizationState.cognitive_scan?.run_id ? visualizationState.cognitive_scan : null;
     const hardwareBusy = Boolean(
         hardwareDiagnostics &&
         hardwareDiagnostics["USRP-01"] &&
         hardwareDiagnostics["USRP-01"].status === "active",
     );
-    const canStop = active || pendingVisualizationAutoOpen || hardwareBusy;
-    const taskName = formatTaskName(visualizationState.task);
+    const canStop = active || scan?.status === "scanning" || pendingVisualizationAutoOpen || hardwareBusy;
+    const taskName = scan ? (scan.status === "scanning" ? "认知选频" : "上次认知选频") : formatTaskName(visualizationState.task);
     const hasDetachedWindow = hasVisualizationWindow();
     const hasVisibleModal = isVisualizationModalVisible();
 
     setTextContent("viz-task-name", taskName);
-    setTextContent("viz-center-freq", formatHz(visualizationState.center_freq_hz));
-    setTextContent("viz-tone-freq", formatHz(visualizationState.tone_freq_hz));
-    setTextContent("viz-sample-rate", formatHz(visualizationState.sample_rate_hz));
-    setTextContent("viz-rx-power", formatDb(visualizationState.rx_power_db));
+    setTextContent("viz-center-freq", formatHz(scan ? scan.current_freq_hz ?? scan.best_freq_hz ?? scan.center_freq_hz : visualizationState.center_freq_hz));
+    setTextContent("viz-tone-freq", formatHz(scan ? null : visualizationState.tone_freq_hz));
+    setTextContent("viz-sample-rate", formatHz(scan ? scan.sample_rate_hz : visualizationState.sample_rate_hz));
+    setTextContent("viz-rx-power", formatDb(scan ? scan.min_power_db : visualizationState.rx_power_db));
+    setTextContent("viz-rx-power-label", scan ? "最低接收功率" : isPacketVisualization() ? "片段接收功率" : "接收功率");
     setTextContent(
         "viz-peak-freq",
-        visualizationState.peak_freq_khz == null
+        scan || visualizationState.peak_freq_khz == null
             ? "--"
-            : `${Number(visualizationState.peak_freq_khz).toFixed(2)} kHz`,
+            : `${Number(visualizationState.peak_freq_khz).toFixed(4)} kHz`,
     );
 
     updateVisualizationStopButtons({
@@ -634,6 +727,7 @@ async function fetchHardwareStatus() {
 
 async function fetchVisualizationState() {
     const previousActivationId = Number(visualizationState.activation_id || 0);
+    const previousScanId = Number(visualizationState.cognitive_scan?.run_id || 0);
     const wasActive = Boolean(visualizationState.active);
     try {
         const res = await fetch(VISUALIZATION_URL, { cache: "no-store" });
@@ -646,10 +740,20 @@ async function fetchVisualizationState() {
         });
     } finally {
         const activationId = Number(visualizationState.activation_id || 0);
+        // All automatic paths share this guard, including historical scans,
+        // delayed SSE events and responses fetched before text setup finished.
+        if (visualizationAutoOpenBlockedByText || isPacketVisualization()) {
+            pendingVisualizationAutoOpen = false;
+            visualizationStateInitialized = true;
+            lastVisualizationActivationId = activationId;
+            updateVisualizationPanel();
+            return;
+        }
         const hasFrame = hasVisualizationFrameData();
         if (!visualizationStateInitialized) {
             visualizationStateInitialized = true;
             lastVisualizationActivationId = activationId;
+            if (visualizationState.cognitive_scan?.status === "scanning") showVisualizationModal();
             updateVisualizationPanel();
             return;
         }
@@ -660,14 +764,16 @@ async function fetchVisualizationState() {
         }
         const shouldAutoOpenOnReady =
             pendingVisualizationAutoOpen &&
+            !isPacketVisualization() &&
             visualizationState.active &&
             hasFrame &&
             (activationChanged || !wasActive || !isVisualizationModalVisible());
-        if (shouldAutoOpenOnReady && !isVisualizationModalVisible()) {
+        const hasNewScan = Number(visualizationState.cognitive_scan?.run_id || 0) > previousScanId;
+        if ((shouldAutoOpenOnReady || hasNewScan) && !isVisualizationModalVisible()) {
             showVisualizationModal();
             pendingVisualizationAutoOpen = false;
         }
-        if (!visualizationState.active) {
+        if (!visualizationState.active && visualizationState.cognitive_scan?.status !== "scanning") {
             pendingVisualizationAutoOpen = false;
         }
         updateVisualizationPanel();
@@ -706,10 +812,17 @@ async function clearContext() {
 async function sendMessage() {
     const text = userInput.value.trim();
     if (!text || isSending) return;
+    const provider = configuredModelProviders[configuredModelProvider];
+    if (provider?.configured === false) {
+        appendMessage("ai", "云端模型暂不可用。");
+        return;
+    }
 
     appendMessage("user", text);
     userInput.value = "";
     isSending = true;
+    updateProviderUI();
+    updateModeUI();
     sendBtn.disabled = true;
     sendBtn.textContent = "发送中...";
 
@@ -747,10 +860,14 @@ async function sendMessage() {
                 instruction: text,
                 session_id: sessionId,
                 mode: currentMode,
+                provider: configuredModelProvider,
                 temperature: currentTemperature,
             }),
         });
-        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(typeof error.detail === "string" ? error.detail : `HTTP Error: ${response.status}`);
+        }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -794,13 +911,15 @@ async function sendMessage() {
                         if (data.active_model) {
                             updateActiveModelUI({ modelName: data.active_model });
                         }
+                    } else if (data.type === "tool_call" && data.name) {
+                        handleVisualizationToolCall(data.name, data.args || {});
                     } else if (data.type === "tool_log" && data.line) {
                         applyStreamingHwLog(streamingRoot, data.line);
-                        if (isVisualizationTriggerLog(data.line)) {
+                        if (!visualizationAutoOpenBlockedByText && isVisualizationTriggerLog(data.line)) {
                             pendingVisualizationAutoOpen = true;
                             fetchVisualizationState();
                         }
-                    } else if (data.type === "visualization" && data.action === "open") {
+                    } else if (data.type === "visualization" && data.action === "open" && !visualizationAutoOpenBlockedByText) {
                         pendingVisualizationAutoOpen = true;
                         fetchVisualizationState();
                     } else if (data.type === "done") {
@@ -864,6 +983,8 @@ async function sendMessage() {
         showRoundTiming(streamingRoot, roundStart, "failed");
     } finally {
         isSending = false;
+        updateProviderUI();
+        updateModeUI();
         sendBtn.disabled = false;
         sendBtn.textContent = "发送消息";
         userInput.focus();
@@ -909,6 +1030,7 @@ window.addEventListener("resize", () => {
 window.onload = () => {
     updateTemperatureUI();
     updateModeUI();
+    updateProviderUI();
     updateActiveModelUI();
     updateVisualizationPanel();
     updateVisualizationModalStatus();

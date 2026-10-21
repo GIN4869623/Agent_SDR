@@ -1,4 +1,4 @@
-"""Evaluate a real local LLM against the current Agent Loop with safe mock tools.
+"""Evaluate a local or DeepSeek LLM with the current Agent Loop and mock tools.
 
 The script uses the configured OpenAI-compatible endpoint and the production
 AgentLoop/router/Skills/tool schemas.  Tool execution is intercepted, so no
@@ -34,7 +34,8 @@ from core.memory import ConversationMemory
 from skill.skills import build_all_skills
 from src.agent.loop import AgentLoop
 from src.agent.trace import RunTraceStore
-from src.config import settings
+from src.config import Settings, settings
+from src.llm import create_llm_client
 from tools import ToolRegistry
 from tools.registry import create_tool_registry
 
@@ -349,6 +350,7 @@ async def _run_case(
     case: EvalCase,
     mode: str,
     temperature: float,
+    config: Settings | None = None,
 ) -> dict[str, Any]:
     tools = MockToolRegistry(schema_registry, case)
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -359,6 +361,7 @@ async def _run_case(
             skill_registry=build_all_skills(),
             memory=ConversationMemory(),
             trace_store=trace_store,
+            config=config,
         )
         done: dict[str, Any] | None = None
         error: str | None = None
@@ -408,21 +411,25 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         model_by_mode = {"custom": args.model}
     else:
         modes = ("think", "fast") if args.mode == "both" else (args.mode,)
-        model_by_mode = {
-            "think": settings.model_think,
-            "fast": settings.model_fast,
-        }
+        model_by_mode = settings.model_map
 
     selected_cases = [case for case in CASES if not args.case or case.case_id in args.case]
     unknown_cases = set(args.case or ()) - {case.case_id for case in CASES}
     if unknown_cases:
         raise SystemExit(f"未知案例：{', '.join(sorted(unknown_cases))}")
 
-    client = OpenAI(api_key=args.api_key, base_url=args.base_url)
+    overrides = {}
+    if args.base_url is not None:
+        overrides["deepseek_base_url" if settings.llm_provider == "deepseek" else "ollama_base_url"] = args.base_url
+    if args.api_key is not None:
+        overrides["deepseek_api_key" if settings.llm_provider == "deepseek" else "api_key"] = args.api_key
+    client_config = Settings.model_validate(settings.model_dump() | overrides)
+    client = create_llm_client(client_config)
     schema_registry = _production_schema_registry()
     report: dict[str, Any] = {
         "schema_version": 1,
-        "base_url": args.base_url,
+        "base_url": client_config.llm_base_url,
+        "llm_provider": client_config.llm_provider,
         "safe_mock_tools": True,
         "repetitions": args.repeat,
         "models": [],
@@ -431,36 +438,28 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     for requested_mode in modes:
         model = model_by_mode[requested_mode]
         loop_mode = "think" if requested_mode == "custom" else requested_mode
-        original_model = settings.model_think if loop_mode == "think" else settings.model_fast
-        if loop_mode == "think":
-            settings.model_think = model
-        else:
-            settings.model_fast = model
+        model_field = f"deepseek_model_{loop_mode}" if client_config.llm_provider == "deepseek" else f"model_{loop_mode}"
+        model_config = client_config.model_copy(update={model_field: model})
 
         results: list[dict[str, Any]] = []
-        try:
-            for repetition in range(1, args.repeat + 1):
-                for case in selected_cases:
-                    result = await _run_case(
-                        client,
-                        schema_registry,
-                        case,
-                        loop_mode,
-                        args.temperature,
-                    )
-                    result["repetition"] = repetition
-                    results.append(result)
-                    state = "PASS" if result["passed"] else "FAIL"
-                    print(
-                        f"[{state}] {model} | {case.case_id} | "
-                        f"{result['score']:.0f}分 | {result['elapsed_ms']:.0f}ms",
-                        flush=True,
-                    )
-        finally:
-            if loop_mode == "think":
-                settings.model_think = original_model
-            else:
-                settings.model_fast = original_model
+        for repetition in range(1, args.repeat + 1):
+            for case in selected_cases:
+                result = await _run_case(
+                    client,
+                    schema_registry,
+                    case,
+                    loop_mode,
+                    args.temperature,
+                    config=model_config,
+                )
+                result["repetition"] = repetition
+                results.append(result)
+                state = "PASS" if result["passed"] else "FAIL"
+                print(
+                    f"[{state}] {model} | {case.case_id} | "
+                    f"{result['score']:.0f}分 | {result['elapsed_ms']:.0f}ms",
+                    flush=True,
+                )
 
         protocol_ok = all(item["checks"].get("protocol", False) for item in results)
         score = round(sum(item["score"] for item in results) / len(results), 2) if results else 0.0
@@ -488,11 +487,11 @@ async def evaluate(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="安全评测本地 LLM 与当前 Agent Loop 的兼容性")
+    parser = argparse.ArgumentParser(description="使用模拟工具评测本地或 DeepSeek 模型与 Agent Loop 的兼容性")
     parser.add_argument("--mode", choices=("think", "fast", "both"), default="fast")
     parser.add_argument("--model", help="评测指定模型；设置后忽略 --mode 对应的模型名")
-    parser.add_argument("--base-url", default=settings.ollama_base_url)
-    parser.add_argument("--api-key", default=settings.api_key)
+    parser.add_argument("--base-url", help="覆盖当前 LLM_PROVIDER 的接口地址")
+    parser.add_argument("--api-key", help="覆盖当前 LLM_PROVIDER 的密钥；通常通过 .env 配置")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--case", action="append", help="只运行指定 case_id，可重复传入")

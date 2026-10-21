@@ -31,9 +31,13 @@ required_actions:
 - probe_text：默认 "channel_probe"，无需修改。
 
 ## SNR 决策规则（SDRController 内部执行）
-- SNR < -18 dB → BPSK（最鲁棒）
-- -18 dB ≤ SNR ≤ -15 dB → QPSK（折中）
-- SNR > -15 dB → 16-QAM（高频谱效率）
+- 探测包通过 BPSK 解调和 CRC 校验后，按以下门限选择：
+  - SNR < 8 dB → BPSK（最鲁棒）
+  - 8 dB ≤ SNR < 16 dB → QPSK（折中）
+  - SNR ≥ 16 dB → 16-QAM（高频谱效率）
+- 探测包未通过解调/CRC 校验时，保守选择 BPSK。
 
 ## 执行规则
 - 如果用户提到了"找干净频点"，应使用认知选频技能代替。
+- 若返回 stage=stream_initialization，说明 UHD 收发流初始化失败；adaptive_stage=probe 时尚未测量 SNR。报告实际错误，不推断为信道干扰或探测包同步失败。
+- 工具执行完成不等于文本解码成功；依据 final_result.decoded_ok 和 decoded_texts 报告接收结果。

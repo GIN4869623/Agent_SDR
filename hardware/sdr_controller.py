@@ -46,6 +46,7 @@ class SDRController:
         self.usrp = None
         self.hw_state = self._build_default_state()
         self.visualization_state = self._build_default_visualization_state()
+        self.cognitive_scan_state: dict[str, Any] = {"run_id": 0, "status": "idle", "candidates": []}
         # 延迟连接：避免 uvicorn --reload 模式下 reloader 进程抢占 USRP
         # 导致实际处理请求的 server 进程无法连接
         if self.driver_available:
@@ -75,6 +76,11 @@ class SDRController:
         return {
             "active": False,
             "task": None,
+            "task_status": "idle",
+            "modulation_scheme": None,
+            "decoded_ok": None,
+            "captured_samples": 0,
+            "capture_window_start_s": None,
             "activation_id": 0,
             "frame_id": 0,
             "updated_at": None,
@@ -152,7 +158,13 @@ class SDRController:
 
     def get_visualization_snapshot(self) -> dict[str, Any]:
         with self.visualization_lock:
-            return deepcopy(self.visualization_state)
+            snapshot = deepcopy(self.visualization_state)
+            snapshot["cognitive_scan"] = deepcopy(self.cognitive_scan_state)
+            return snapshot
+
+    def _update_cognitive_scan(self, **changes: Any) -> None:
+        with self.visualization_lock:
+            self.cognitive_scan_state.update(deepcopy(changes))
 
     def _ensure_available(self) -> dict[str, Any] | None:
         if not self.driver_available:
@@ -268,6 +280,11 @@ class SDRController:
                 {
                     "active": True,
                     "task": task,
+                    "task_status": "running",
+                    "modulation_scheme": None,
+                    "decoded_ok": None,
+                    "captured_samples": 0,
+                    "capture_window_start_s": None,
                     "activation_id": next_activation_id,
                     "frame_id": 0,
                     "updated_at": time.time(),
@@ -293,6 +310,7 @@ class SDRController:
                 {
                     "active": False,
                     "task": None,
+                    "task_status": "error" if error else "stopped",
                     "frame_id": 0,
                     "updated_at": time.time(),
                     "iq_inphase": [],
@@ -306,6 +324,35 @@ class SDRController:
                     "rx_frames": 0,
                     "error": error,
                 }
+            )
+
+    def _publish_packet_capture(self, iq: np.ndarray, samp_rate: float) -> None:
+        """Publish one captured packet window, rather than imply a live feed."""
+        if iq.size < 16:
+            return
+        window_size = min(int(iq.size), 2048)
+        window_count = int(iq.size) // window_size
+        windows = iq[: window_count * window_size].reshape(window_count, window_size)
+        start = int(np.argmax(np.mean(np.abs(windows) ** 2, axis=1))) * window_size
+        self._update_visualization_frame(iq[start : start + window_size], samp_rate)
+        with self.visualization_lock:
+            self.visualization_state.update(
+                captured_samples=int(iq.size), capture_window_start_s=start / float(samp_rate)
+            )
+
+    def _finish_packet_visualization(self, result: dict[str, Any] | None) -> None:
+        result = result or {}
+        final = result.get("final_result", result)
+        stopped = self.bg_stop_event.is_set() or bool(result.get("stopped"))
+        status = "stopped" if stopped else ("completed" if result.get("status") == "success" else "error")
+        with self.visualization_lock:
+            self.visualization_state.update(
+                active=False,
+                task_status=status,
+                decoded_ok=final.get("decoded_ok"),
+                tx_samples=int(final.get("tx_samples_sent") or 0),
+                error=(result.get("error") or result.get("message") or "发送任务异常结束。") if status == "error" else None,
+                updated_at=time.time(),
             )
 
     def _update_visualization_frame(self, iq: np.ndarray, samp_rate: float) -> None:
@@ -329,8 +376,8 @@ class SDRController:
             self.visualization_state["iq_quadrature"] = _downsample_for_plot(np.imag(display_iq), 400)
             self.visualization_state["fft_freq_khz"] = _downsample_for_plot(freqs, 256)
             self.visualization_state["fft_magnitude_db"] = _downsample_for_plot(magnitude, 256)
-            self.visualization_state["rx_power_db"] = round(float(power_db), 2)
-            self.visualization_state["peak_freq_khz"] = round(float(freqs[peak_index]), 2)
+            self.visualization_state["rx_power_db"] = float(power_db)
+            self.visualization_state["peak_freq_khz"] = float(freqs[peak_index])
             self.visualization_state["rx_frames"] = int(self.visualization_state.get("rx_frames", 0)) + 1
             self.visualization_state["error"] = None
 
@@ -508,11 +555,20 @@ class SDRController:
         rx_stream = None
         rx_thread: threading.Thread | None = None
         stop_rx = threading.Event()
+        result: dict[str, Any] | None = None
+        visualization_started = False
         try:
             try:
                 modulation_scheme = normalize_text_modulation_scheme(modulation_scheme)
             except ValueError as exc:
                 return self._error(str(exc))
+            self._set_visualization_active(
+                task="text_transmit", center_freq_hz=center_freq_hz,
+                tone_freq_hz=None, sample_rate_hz=samp_rate,
+            )
+            visualization_started = True
+            with self.visualization_lock:
+                self.visualization_state["modulation_scheme"] = modulation_scheme
             if modulation_scheme != "2-FSK":
                 result = self._run_modulation_once(
                     text=text,
@@ -647,8 +703,9 @@ class SDRController:
             self._stop_rx_stream(rx_stream)
             self._join_thread(rx_thread, timeout=2.5)
             captured_iq = np.concatenate(captured) if captured else np.array([], dtype=np.complex64)
+            self._publish_packet_capture(captured_iq, float(samp_rate))
             if self.bg_stop_event.is_set():
-                return self._success(
+                result = self._success(
                     "文本链路任务已停止。",
                     stopped=True,
                     sent_text=text,
@@ -657,6 +714,7 @@ class SDRController:
                     tx_samples_requested=int(tx_iq.size),
                     tx_samples_sent=int(tx_samples_sent),
                 )
+                return result
             rx_diagnostics = estimate_fsk_rx_diagnostics(captured_iq, samp_rate=float(samp_rate))
             decoded, decode_diag = (
                 decode_texts_from_iq(
@@ -668,7 +726,7 @@ class SDRController:
                 if captured
                 else ([], {"failures": ["未捕获到任何IQ样本"]})
             )
-            return self._success(
+            result = self._success(
                 "文本链路执行完成。",
                 sent_text=text,
                 modulation_scheme="2-FSK",
@@ -686,6 +744,7 @@ class SDRController:
                 rx_metadata_errors=rx_metadata_errors[:5],
                 **rx_diagnostics,
             )
+            return result
         finally:
             stop_rx.set()
             self._stop_rx_stream(rx_stream)
@@ -694,6 +753,8 @@ class SDRController:
             tx_stream = None
             rx_stream = None
             self._clear_background_runtime()
+            if visualization_started:
+                self._finish_packet_visualization(result)
             self._set_state("online")
             self._release_hw_lock()
 
@@ -709,6 +770,12 @@ class SDRController:
             return self._error("硬件正忙，请先停止当前任务。")
 
         self.bg_stop_event.clear()
+        result: dict[str, Any] | None = None
+        self._set_visualization_active(
+            task="adaptive_transmit", center_freq_hz=center_freq_hz,
+            tone_freq_hz=None, sample_rate_hz=DEFAULT_AMC_SAMPLE_RATE_HZ,
+        )
+        adaptive_stage = "probe"
         try:
             probe_result = self._run_modulation_once(
                 text=probe_text,
@@ -716,9 +783,11 @@ class SDRController:
                 mod_scheme="BPSK",
             )
             if probe_result.get("stopped"):
+                result = probe_result
                 return probe_result
             if probe_result.get("status") != "success":
-                return probe_result
+                result = {**probe_result, "adaptive_stage": adaptive_stage}
+                return result
 
             estimated_snr_db = float(probe_result["estimated_snr_db"])
             probe_decoded_ok = bool(probe_result.get("decoded_ok"))
@@ -732,19 +801,25 @@ class SDRController:
                 if probe_decoded_ok
                 else "probe 包未通过 BPSK 解调/CRC 校验，保守锁定 BPSK。"
             )
+            adaptive_stage = "payload"
             final_result = self._run_modulation_once(
                 text=text,
                 center_freq_hz=center_freq_hz,
                 mod_scheme=selected_modulation,
             )
             if final_result.get("stopped"):
+                result = final_result
                 return final_result
             if final_result.get("status") != "success":
-                return final_result
+                result = {**final_result, "adaptive_stage": adaptive_stage}
+                return result
 
-            return self._success(
-                f"已根据链路质量自动选择 {selected_modulation} 完成发送，并按该调制方式完成接收解调。",
+            decoded_ok = bool(final_result.get("decoded_ok"))
+            result = self._success(
+                f"已根据链路质量自动选择 {selected_modulation} 完成发送，"
+                + ("正式文本已通过接收解码和 CRC 校验。" if decoded_ok else "正式文本未通过接收解码/CRC 校验。"),
                 center_freq_hz=float(center_freq_hz),
+                decoded_ok=decoded_ok,
                 probe_snr_db=round(estimated_snr_db, 2),
                 selected_modulation=selected_modulation,
                 probe_decoded_ok=probe_decoded_ok,
@@ -752,7 +827,12 @@ class SDRController:
                 probe_result=probe_result,
                 final_result=final_result,
             )
+            return result
+        except Exception as exc:
+            result = self._error(str(exc), adaptive_stage=adaptive_stage)
+            return result
         finally:
+            self._finish_packet_visualization(result)
             self._set_state("online")
             self._release_hw_lock()
 
@@ -1045,12 +1125,33 @@ class SDRController:
         scan_logs: dict[str, float] = {}
         rx_stream = None
         stopped_by_user = False
+        candidates: list[dict[str, Any]] = []
 
         try:
+            self._set_visualization_stopped()
             step_hz = 5e6
             start_hz = center_freq_hz - (search_span_hz / 2)
             end_hz = center_freq_hz + (search_span_hz / 2)
             freqs = np.arange(start_hz, end_hz + 1, step_hz)
+            candidates = [
+                {"freq_hz": float(freq), "power_db": None, "status": "pending"}
+                for freq in freqs
+            ]
+            with self.visualization_lock:
+                self.cognitive_scan_state = {
+                    "run_id": int(self.cognitive_scan_state["run_id"]) + 1,
+                    "status": "scanning",
+                    "center_freq_hz": float(center_freq_hz),
+                    "search_span_hz": float(search_span_hz),
+                    "step_hz": step_hz,
+                    "sample_rate_hz": 1e6,
+                    "samples_per_candidate": 1024,
+                    "candidates": deepcopy(candidates),
+                    "current_freq_hz": None,
+                    "best_freq_hz": None,
+                    "min_power_db": None,
+                    "error": None,
+                }
 
             self._set_state(
                 "active",
@@ -1064,10 +1165,12 @@ class SDRController:
             buffer = np.zeros((1, 1024), dtype=np.complex64)
             metadata = uhd.types.RXMetadata()
 
-            for freq in freqs:
+            for index, freq in enumerate(freqs):
                 if self.bg_stop_event.is_set():
                     stopped_by_user = True
                     break
+                candidates[index]["status"] = "measuring"
+                self._update_cognitive_scan(current_freq_hz=float(freq), candidates=candidates)
                 self.usrp.set_rx_freq(uhd.libpyuhd.types.tune_request(freq), 0)
                 time.sleep(0.05)
                 if self.bg_stop_event.is_set():
@@ -1077,15 +1180,50 @@ class SDRController:
                 cmd.num_samps = 1024
                 cmd.stream_now = True
                 rx_stream.issue_stream_cmd(cmd)
-                rx_stream.recv(buffer, metadata)
+                received = int(rx_stream.recv(buffer, metadata))
                 if self.bg_stop_event.is_set():
                     stopped_by_user = True
                     break
-                power_db = 10 * np.log10(np.mean(np.abs(buffer[0]) ** 2) + 1e-12)
-                scan_logs[f"{freq / 1e6:.1f} MHz"] = round(float(power_db), 2)
+                # Only publish valid samples; empty/stale buffers must not win selection.
+                if received <= 0 or metadata.error_code != uhd.types.RXMetadataErrorCode.none:
+                    candidates[index]["status"] = "invalid"
+                    self._update_cognitive_scan(candidates=candidates)
+                    continue
+                power_db = 10 * np.log10(np.mean(np.abs(buffer[0, :received]) ** 2) + 1e-12)
+                if not np.isfinite(power_db):
+                    candidates[index]["status"] = "invalid"
+                    self._update_cognitive_scan(candidates=candidates)
+                    continue
+                candidates[index].update(power_db=float(power_db), status="measured", samples=received)
+                scan_logs[f"{freq / 1e6:.4f} MHz"] = float(power_db)
                 if power_db < min_power:
                     min_power = float(power_db)
                     best_freq = float(freq)
+                self._update_cognitive_scan(
+                    candidates=candidates, best_freq_hz=best_freq, min_power_db=min_power
+                )
+            for candidate in candidates:
+                if candidate["status"] == "measuring":
+                    candidate["status"] = "pending"
+            self._update_cognitive_scan(
+                status="stopped" if stopped_by_user else ("completed" if scan_logs else "error"),
+                current_freq_hz=None,
+                candidates=candidates,
+                error=None if scan_logs or stopped_by_user else "未获得有效接收样本，无法选择频点。",
+            )
+        except Exception as exc:
+            stopped_by_user = self.bg_stop_event.is_set()
+            for candidate in candidates:
+                if candidate["status"] == "measuring":
+                    candidate["status"] = "pending" if stopped_by_user else "invalid"
+            self._update_cognitive_scan(
+                status="stopped" if stopped_by_user else "error",
+                current_freq_hz=None,
+                candidates=candidates,
+                error=None if stopped_by_user else str(exc),
+            )
+            if not stopped_by_user:
+                raise
         finally:
             self._stop_rx_stream(rx_stream)
             rx_stream = None
@@ -1101,10 +1239,16 @@ class SDRController:
                 scan_details=scan_logs,
             )
 
+        if not scan_logs:
+            return self._error("未获得有效接收样本，无法选择频点。")
+
         result = self._success(
-            f"已锁定较干净的信道 {best_freq / 1e6:.1f} MHz。",
+            f"已锁定较干净的信道 {best_freq / 1e6:.4f} MHz。",
             best_freq_hz=float(best_freq),
-            min_power_db=round(min_power, 2),
+            min_power_db=min_power,
+            search_span_hz=float(search_span_hz),
+            scan_step_hz=step_hz,
+            candidate_count=len(candidates),
             scan_details=scan_logs,
         )
 
@@ -1136,6 +1280,44 @@ class SDRController:
             return "QPSK"
         return "16-QAM"
 
+    def _open_linear_modulation_streams(
+        self, center_freq_hz: float, samp_rate: float, tx_gain: float, rx_gain: float,
+    ) -> tuple[Any, Any]:
+        """Recover transport setup once, before any text samples are sent."""
+        for attempt in range(2):
+            tx_stream = None
+            rx_stream = None
+            try:
+                self.usrp.set_tx_freq(uhd.libpyuhd.types.tune_request(center_freq_hz), 0)
+                self.usrp.set_tx_rate(samp_rate, 0)
+                self.usrp.set_tx_gain(tx_gain, 0)
+                self.usrp.set_rx_freq(uhd.libpyuhd.types.tune_request(center_freq_hz), 0)
+                self.usrp.set_rx_rate(samp_rate, 0)
+                self.usrp.set_rx_gain(rx_gain, 0)
+                # Match Tone setup: let rate/tuning changes settle before the
+                # RFNoC transport initialization handshake.
+                if self.bg_stop_event.wait(0.3 if attempt == 0 else 0.7):
+                    return None, None
+                rx_stream = self.usrp.get_rx_stream(uhd.usrp.StreamArgs("fc32", "sc16"))
+                tx_stream = self.usrp.get_tx_stream(uhd.usrp.StreamArgs("fc32", "sc16"))
+                return tx_stream, rx_stream
+            except Exception as exc:
+                self._stop_rx_stream(rx_stream)
+                tx_stream = None
+                rx_stream = None
+                self._clear_background_runtime()
+                if attempt != 0 or not self._is_transient_transport_error(exc):
+                    raise
+                if self.bg_stop_event.is_set():
+                    return None, None
+                self.usrp = None
+                if self.bg_stop_event.wait(0.5):
+                    return None, None
+                self._connect()
+                if self.usrp is None:
+                    raise RuntimeError("UHD 传输初始化超时后重连 USRP 失败。") from exc
+        raise RuntimeError("未能初始化文本收发流。")
+
     def _run_modulation_once(
         self,
         text: str,
@@ -1154,6 +1336,12 @@ class SDRController:
         rx_metadata_errors: list[str] = []
         thread: threading.Thread | None = None
         stop_rx = threading.Event()
+        with self.visualization_lock:
+            self.visualization_state.update(
+                modulation_scheme=mod_scheme, iq_inphase=[], iq_quadrature=[],
+                fft_freq_khz=[], fft_magnitude_db=[], rx_power_db=None,
+                peak_freq_khz=None, captured_samples=0, capture_window_start_s=None,
+            )
         self._set_state(
             "active",
             f"{center_freq_hz / 1e9:.3f} GHz ({state_label})",
@@ -1175,15 +1363,25 @@ class SDRController:
             tx_iq = np.concatenate(tx_parts)
             tx_time = len(tx_iq) / float(samp_rate)
 
-            self.usrp.set_tx_freq(uhd.libpyuhd.types.tune_request(center_freq_hz), 0)
-            self.usrp.set_tx_rate(samp_rate, 0)
-            self.usrp.set_tx_gain(tx_gain, 0)
-            self.usrp.set_rx_freq(uhd.libpyuhd.types.tune_request(center_freq_hz), 0)
-            self.usrp.set_rx_rate(samp_rate, 0)
-            self.usrp.set_rx_gain(rx_gain, 0)
-
-            tx_stream = self.usrp.get_tx_stream(uhd.usrp.StreamArgs("fc32", "sc16"))
-            rx_stream = self.usrp.get_rx_stream(uhd.usrp.StreamArgs("fc32", "sc16"))
+            try:
+                tx_stream, rx_stream = self._open_linear_modulation_streams(
+                    center_freq_hz, samp_rate, tx_gain, rx_gain,
+                )
+            except Exception as exc:
+                return self._error(
+                    f"UHD 文本收发流初始化失败：{exc}",
+                    stage="stream_initialization",
+                    tested_modulation=mod_scheme,
+                    tx_started=False,
+                )
+            if self.bg_stop_event.is_set():
+                return self._success("文本收发流初始化已停止。", stopped=True)
+            # Reconnection resets the hardware summary to idle defaults.
+            self._set_state(
+                "active", f"{center_freq_hz / 1e9:.3f} GHz ({state_label})",
+                f"{samp_rate / 1e6:.1f} MS/s", f"{tx_gain:.0f} / {rx_gain:.0f} dB",
+                modulation=mod_scheme,
+            )
             self._set_hardware_runtime(tx_stream=tx_stream, rx_stream=rx_stream)
 
             def rx_worker() -> None:
@@ -1250,6 +1448,7 @@ class SDRController:
             self._join_thread(thread, timeout=2.5)
 
             rx_iq = np.concatenate(captured) if captured else np.array([], dtype=np.complex64)
+            self._publish_packet_capture(rx_iq, float(samp_rate))
             if self.bg_stop_event.is_set():
                 return self._success(
                     f"{mod_scheme} 测试已停止。",

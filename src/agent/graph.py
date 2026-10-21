@@ -38,7 +38,7 @@ from src.agent.router import (
     route_system_note,
 )
 from src.agent.trace import RunTrace, RunTraceStore, build_diagnosis
-from src.config import settings
+from src.config import Settings, settings
 from tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -111,10 +111,16 @@ def _tool_effect_status(raw_status: Any, completed_actions: set[str]) -> str:
     return "incomplete"
 
 
-def _assistant_msg(content: str, tool_calls: list[dict] | None = None) -> dict:
+def _assistant_msg(
+    content: str,
+    tool_calls: list[dict] | None = None,
+    reasoning_content: str | None = None,
+) -> dict:
     message: dict[str, Any] = {"role": "assistant", "content": content}
     if tool_calls:
         message["tool_calls"] = tool_calls
+    if reasoning_content is not None:
+        message["reasoning_content"] = reasoning_content
     return message
 
 
@@ -137,8 +143,11 @@ class AgentLoop:
         skill_registry: SkillRegistry | None,
         memory: ConversationMemory,
         trace_store: RunTraceStore | None = None,
+        *,
+        config: Settings | None = None,
     ) -> None:
         self.llm = llm_client
+        self.config = config if config is not None else settings
         self.tools = tool_registry
         self.skills = skill_registry
         self.memory = memory
@@ -181,15 +190,15 @@ class AgentLoop:
 
     def normalize_mode(self, mode: str) -> str:
         key = (mode or "think").strip().lower()
-        return key if key in settings.model_map else "think"
+        return key if key in self.config.model_map else "think"
 
     def resolve_model(self, mode: str) -> str:
-        return settings.model_map[self.normalize_mode(mode)]
+        return self.config.model_map[self.normalize_mode(mode)]
 
     def resolve_temperature(self, mode: str, override: float | None) -> float:
         if override is not None:
             return max(0.0, min(2.0, float(override)))
-        return float(settings.temperature_map[self.normalize_mode(mode)])
+        return float(self.config.temperature_map[self.normalize_mode(mode)])
 
     def _flush_pending_completion(self) -> None:
         if (
@@ -222,7 +231,7 @@ class AgentLoop:
         request_start = request_started_at or agent_start
         selected_mode = self.normalize_mode(mode)
         active_run_id = run_id or str(uuid.uuid4())
-        turn_limit = max_turns or settings.max_tool_turns
+        turn_limit = max_turns or self.config.max_tool_turns
         trace = RunTrace(
             run_id=active_run_id,
             session_id=session_id,
@@ -339,11 +348,16 @@ class AgentLoop:
         memory_start = time.perf_counter()
         history = self.memory.get_history(state["session_id"])
         history_limit = (
-            settings.fast_history_messages
+            self.config.fast_history_messages
             if state["selected_mode"] == "fast"
-            else settings.general_history_messages
+            else self.config.general_history_messages
         )
         trimmed_history = history[-history_limit:] if history_limit > 0 else []
+        if self.config.llm_provider != "deepseek":
+            trimmed_history = [
+                {key: value for key, value in message.items() if key != "reasoning_content"}
+                for message in trimmed_history
+            ]
         memory_read_ms = _elapsed_ms(memory_start)
 
         route_start = time.perf_counter()
@@ -475,6 +489,11 @@ class AgentLoop:
             for call in tool_history
         )
         tool_choice = "auto" if attempted_stage else "required"
+        deepseek = self.config.llm_provider == "deepseek"
+        deepseek_thinking = deepseek and state["selected_mode"] == "think"
+        if deepseek_thinking:
+            # DeepSeek rejects forced tool selection while thinking is enabled.
+            tool_choice = "auto"
         if openai_tools:
             purpose = "tool_decision"
         elif plan.needs_clarification:
@@ -504,6 +523,13 @@ class AgentLoop:
             "temperature": state["active_temperature"],
             "stream": True,
         }
+        if deepseek:
+            stream_kwargs["extra_body"] = {
+                "thinking": {"type": "enabled" if deepseek_thinking else "disabled"}
+            }
+            if deepseek_thinking:
+                # Temperature has no effect in DeepSeek thinking mode.
+                stream_kwargs.pop("temperature")
         if openai_tools:
             stream_kwargs["tools"] = openai_tools
             stream_kwargs["tool_choice"] = tool_choice
@@ -525,6 +551,7 @@ class AgentLoop:
         completion_tokens: int | None = None
         total_tokens: int | None = None
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_parts: dict[int, dict[str, str]] = defaultdict(
             lambda: {"id": "", "name": "", "arguments": ""}
         )
@@ -546,8 +573,11 @@ class AgentLoop:
             if delta is None:
                 return
             content = getattr(delta, "content", None)
+            reasoning = getattr(delta, "reasoning_content", None)
             calls = getattr(delta, "tool_calls", None)
-            if first_output_ms is None and (content or calls):
+            if deepseek_thinking and reasoning:
+                reasoning_parts.append(str(reasoning))
+            if first_output_ms is None and (content or calls or reasoning):
                 first_output_ms = round(service_wait_ms, 2)
             if content:
                 if first_text_ms is None:
@@ -605,6 +635,7 @@ class AgentLoop:
                 }
             )
         assistant_text = "".join(text_parts)
+        reasoning_content = "".join(reasoning_parts) if deepseek_thinking else None
         stream_wall_ms = _elapsed_ms(llm_start)
         llm_total_ms = round(service_wait_ms, 2)
         generation_ms = (
@@ -654,7 +685,7 @@ class AgentLoop:
         next_turn = turn + 1
         if not tool_calls:
             if openai_tools and not attempted_stage:
-                messages.append(_assistant_msg(assistant_text))
+                messages.append(_assistant_msg(assistant_text, reasoning_content=reasoning_content))
                 messages.append(
                     {
                         "role": "system",
@@ -686,7 +717,7 @@ class AgentLoop:
                         "call_model" if next_turn < max_turns else "finalize"
                     ),
                 }
-            messages.append(_assistant_msg(assistant_text))
+            messages.append(_assistant_msg(assistant_text, reasoning_content=reasoning_content))
             return {
                 "messages": messages,
                 "llm_call_metrics": metrics,
@@ -698,7 +729,7 @@ class AgentLoop:
                 "next_action": "finalize",
             }
 
-        messages.append(_assistant_msg(assistant_text, tool_calls))
+        messages.append(_assistant_msg(assistant_text, tool_calls, reasoning_content))
         return {
             "messages": messages,
             "llm_call_metrics": metrics,
@@ -1044,7 +1075,11 @@ class AgentLoop:
                 if role == "assistant" and message.get("tool_calls"):
                     continue
                 if content.strip():
-                    clean_history.append({"role": role, "content": content})
+                    history_message = {"role": role, "content": content}
+                    if self.config.llm_provider == "deepseek" and role == "assistant":
+                        if "reasoning_content" in message:
+                            history_message["reasoning_content"] = message["reasoning_content"]
+                    clean_history.append(history_message)
         self.memory.replace(state["session_id"], clean_history)
 
         total_ms = _elapsed_ms(state["request_started_at"])

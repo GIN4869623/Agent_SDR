@@ -102,7 +102,13 @@ _VIDEO_STOP = re.compile(r"(停止|关闭|停掉|终止).{0,8}(视频流|video|v
 _VIDEO_STATUS = re.compile(r"(状态|是否运行|查询).{0,8}(视频流|video|vlc)|(视频流|video|vlc).{0,8}(状态|是否运行)", re.I)
 _TEXT_TRANSMIT = re.compile(r"(发送|发射|传输|收发|发出去)|(文本|文字|消息).{0,12}(发送|发射|传输)", re.I)
 _NEGATED_TRANSMIT = re.compile(r"(不|不要|无需|不用).{0,6}(发送|发射|传输|收发)", re.I)
-_TONE_REQUEST = re.compile(r"(tone|正弦|单音|连续波|波形|频谱|可视化|框图)", re.I)
+_TONE_SIGNAL = re.compile(r"(tone|正弦|单音|连续波)", re.I)
+_TONE_TRANSMISSION = re.compile(
+    r"(发送|发射|传输|收发|发出去)\s*(?:一个|一段|连续)?\s*"
+    r"(?:\d+(?:\.\d+)?\s*(?:hz|khz|mhz)\s*)?"
+    r"(?:tone|正弦(?:波)?|单音|连续波)(?:信号)?", re.I,
+)
+_TEXT_PAYLOAD = re.compile(r"(文本|文字|消息|数据|[\"'“‘])", re.I)
 _ADAPTIVE_REQUEST = re.compile(r"(自适应|adaptive|自动选择|自动切换|根据信道|根据链路|根据\s*snr|按\s*snr)", re.I)
 
 
@@ -186,9 +192,14 @@ def _dynamic_required_actions(
 ) -> frozenset[str]:
     actions = set(skill.required_actions)
     if skill.name == "auto_optimal_transmit":
-        if _TEXT_TRANSMIT.search(instruction) and not _NEGATED_TRANSMIT.search(instruction):
+        tone_signal_only = (
+            bool(_TONE_TRANSMISSION.search(instruction))
+            and not _TEXT_PAYLOAD.search(instruction)
+            and not _TEXT_TRANSMIT.search(_TONE_TRANSMISSION.sub("", instruction))
+        )
+        if _TEXT_TRANSMIT.search(instruction) and not _NEGATED_TRANSMIT.search(instruction) and not tone_signal_only:
             actions.add("transmit_text")
-        if _TONE_REQUEST.search(instruction):
+        if _TONE_SIGNAL.search(instruction):
             actions.add("visualize_tone")
         if _ADAPTIVE_REQUEST.search(instruction):
             actions.add("select_modulation")

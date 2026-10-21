@@ -143,7 +143,7 @@ class AutoOptimalTransmitRequest(ToolInput):
         default=30e6,
         ge=SEARCH_SPAN_MIN_HZ,
         le=SEARCH_SPAN_MAX_HZ,
-        description="频点搜索跨度，单位 Hz；允许 5-100 MHz。",
+        description="频点搜索区间的总宽度，单位 Hz；默认 30000000（30 MHz，5 MHz 步长共 7 点）。只有用户明确指定搜索跨度或区间时才修改，允许 5-100 MHz。",
     )
     enable_tone: bool = Field(default=False, description="是否在最优频点启动 Tone 可视化。")
     tone_freq_hz: float = Field(

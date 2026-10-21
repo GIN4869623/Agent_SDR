@@ -5,18 +5,23 @@ const EMBEDDED_MODE = new URLSearchParams(window.location.search).get("embedded"
 
 let visualizationState = normalizeVisualizationState();
 let hardwareBusy = false;
-let lastRenderedFrameId = -1;
+let lastRenderedPlotKey = "";
 
 const iqCanvas = document.getElementById("iq-canvas");
 const fftCanvas = document.getElementById("fft-canvas");
 const statusText = document.getElementById("viz-status-text");
 const stopBtn = document.getElementById("viz-stop-btn");
 const refreshBtn = document.getElementById("viz-refresh-btn");
+const cognitiveView = new CognitiveSelectionView();
 
 function normalizeVisualizationState(raw = {}) {
     return {
         active: Boolean(raw.active),
         task: raw.task ?? null,
+        task_status: raw.task_status ?? null,
+        modulation_scheme: raw.modulation_scheme ?? null,
+        decoded_ok: raw.decoded_ok ?? null,
+        captured_samples: Number(raw.captured_samples || 0),
         activation_id: Number(raw.activation_id || 0),
         frame_id: Number(raw.frame_id || 0),
         center_freq_hz: raw.center_freq_hz == null ? null : Number(raw.center_freq_hz),
@@ -29,27 +34,30 @@ function normalizeVisualizationState(raw = {}) {
         rx_power_db: raw.rx_power_db == null ? null : Number(raw.rx_power_db),
         peak_freq_khz: raw.peak_freq_khz == null ? null : Number(raw.peak_freq_khz),
         error: raw.error ?? null,
+        cognitive_scan: raw.cognitive_scan ?? null,
     };
 }
 
 function formatHz(value) {
     if (value == null || Number.isNaN(Number(value))) return "--";
     const numeric = Number(value);
-    if (Math.abs(numeric) >= 1e9) return `${(numeric / 1e9).toFixed(3)} GHz`;
-    if (Math.abs(numeric) >= 1e6) return `${(numeric / 1e6).toFixed(3)} MHz`;
-    if (Math.abs(numeric) >= 1e3) return `${(numeric / 1e3).toFixed(3)} kHz`;
-    return `${numeric.toFixed(2)} Hz`;
+    if (Math.abs(numeric) >= 1e9) return `${(numeric / 1e9).toFixed(7)} GHz`;
+    if (Math.abs(numeric) >= 1e6) return `${(numeric / 1e6).toFixed(4)} MHz`;
+    if (Math.abs(numeric) >= 1e3) return `${(numeric / 1e3).toFixed(4)} kHz`;
+    return `${numeric.toFixed(4)} Hz`;
 }
 
 function formatDb(value) {
     if (value == null || Number.isNaN(Number(value))) return "--";
-    return `${Number(value).toFixed(2)} dB`;
+    return `${Number(value).toFixed(4)} dB`;
 }
 
 function formatTaskName(task) {
     if (!task) return "--";
     const known = {
         tone_loopback: "Tone 回环",
+        text_transmit: "固定调制文本收发",
+        adaptive_transmit: "自适应文本收发",
     };
     return known[task] || String(task).replace(/_/g, " ");
 }
@@ -127,12 +135,40 @@ function formatAxisValue(value) {
     return numeric.toFixed(2);
 }
 
-function defaultSpectrumHalfSpanKHz() {
-    const sampleRate = Number(visualizationState.sample_rate_hz);
+function makeSpectrumFrequencyAxis(freqs, sampleRateHz) {
+    const sampleRate = Number(sampleRateHz);
+    const numericFreqs = Array.isArray(freqs) ? freqs.map(Number).filter(Number.isFinite) : [];
+    let halfSpan = 500;
     if (Number.isFinite(sampleRate) && sampleRate > 0) {
-        return Math.max(sampleRate / 2000, 0.5);
+        halfSpan = sampleRate / 2000;
+    } else if (numericFreqs.some((value) => value !== 0)) {
+        halfSpan = Math.max(...numericFreqs.map(Math.abs));
     }
-    return 500;
+    // FFT bins exclude the positive Nyquist endpoint for even-sized FFTs.
+    // Use the symmetric sampling band, so its midpoint is exactly DC.
+    const ticks = [-1, -0.5, 0, 0.5, 1].map((fraction) => {
+        const value = fraction * halfSpan;
+        return {
+            value,
+            label: value === 0 ? "0 (中心)" : `${value > 0 ? "+" : "-"}${formatAxisValue(Math.abs(value))}`,
+            emphasized: value === 0,
+        };
+    });
+    return { min: -halfSpan, max: halfSpan, ticks };
+}
+
+function updateSpectrumFrequencyReference() {
+    const centerHz = visualizationState.center_freq_hz;
+    const center = centerHz == null ? "待获取射频中心频率" : `0 kHz 对应射频中心 ${formatHz(centerHz)}`;
+    const peakKHz = visualizationState.peak_freq_khz;
+    let peak = "";
+    if (hasFrameData() && peakKHz != null) {
+        const offset = `${peakKHz > 0 ? "+" : ""}${Number(peakKHz).toFixed(4)} kHz`;
+        peak = ` 当前峰值偏移：${offset}`;
+        if (centerHz != null) peak += `（射频 ${formatHz(centerHz + peakKHz * 1000)}）`;
+        peak += "。";
+    }
+    setText("fft-frequency-reference", `${center}；负值表示低于中心，正值表示高于中心。${peak}`);
 }
 
 function drawChartChrome(ctx, width, height, options = {}) {
@@ -161,6 +197,7 @@ function drawChartChrome(ctx, width, height, options = {}) {
     ctx.strokeStyle = "rgba(148, 163, 184, 0.16)";
     ctx.lineWidth = 1;
     xTicks.forEach((tick) => {
+        ctx.strokeStyle = tick.emphasized ? "rgba(56, 189, 248, 0.55)" : "rgba(148, 163, 184, 0.16)";
         const ratio = (Number(tick.value) - minX) / Math.max(maxX - minX, 1e-9);
         const pos = plot.x + ratio * plot.width + 0.5;
         ctx.beginPath();
@@ -168,6 +205,7 @@ function drawChartChrome(ctx, width, height, options = {}) {
         ctx.lineTo(pos, plot.y + plot.height);
         ctx.stroke();
     });
+    ctx.strokeStyle = "rgba(148, 163, 184, 0.16)";
     yTicks.forEach((tick) => {
         const ratio = (Number(tick.value) - minY) / Math.max(maxY - minY, 1e-9);
         const pos = plot.y + plot.height - ratio * plot.height + 0.5;
@@ -188,12 +226,16 @@ function drawChartChrome(ctx, width, height, options = {}) {
     ctx.font = "11px Consolas, monospace";
     ctx.textBaseline = "top";
     xTicks.forEach((tick) => {
+        ctx.fillStyle = tick.emphasized ? "#7dd3fc" : "rgba(203, 213, 225, 0.92)";
+        ctx.font = tick.emphasized ? "bold 11px Consolas, monospace" : "11px Consolas, monospace";
         const ratio = (Number(tick.value) - minX) / Math.max(maxX - minX, 1e-9);
         const pos = plot.x + ratio * plot.width;
         ctx.textAlign = ratio <= 0.05 ? "left" : ratio >= 0.95 ? "right" : "center";
         ctx.fillText(tick.label, pos, plot.y + plot.height + 8);
     });
 
+    ctx.fillStyle = "rgba(203, 213, 225, 0.92)";
+    ctx.font = "11px Consolas, monospace";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
     yTicks.forEach((tick) => {
@@ -298,19 +340,18 @@ function drawSpectrumCanvas(canvas, freqs, magnitudes) {
     if (!surface) return;
 
     const { ctx, width, height } = surface;
-    const numericFreqs = Array.isArray(freqs) ? freqs.map(Number).filter(Number.isFinite) : [];
     const numericMagnitudes = Array.isArray(magnitudes) ? magnitudes.map(Number).filter(Number.isFinite) : [];
-    const defaultHalfSpan = defaultSpectrumHalfSpanKHz();
-    const minFreq = numericFreqs.length ? Math.min(...numericFreqs) : -defaultHalfSpan;
-    const maxFreq = numericFreqs.length ? Math.max(...numericFreqs) : defaultHalfSpan;
+    const axis = makeSpectrumFrequencyAxis(freqs, visualizationState.sample_rate_hz);
+    const minFreq = axis.min;
+    const maxFreq = axis.max;
     const minMag = numericMagnitudes.length ? Math.min(...numericMagnitudes) : -120;
     const maxMag = numericMagnitudes.length ? Math.max(...numericMagnitudes) : 0;
     const paddedMinMag = minMag === maxMag ? minMag - 1 : minMag;
     const paddedMaxMag = minMag === maxMag ? maxMag + 1 : maxMag;
     const plot = drawChartChrome(ctx, width, height, {
-        xLabel: "频率偏移 (kHz)",
+        xLabel: "相对中心频率的偏移 (kHz)",
         yLabel: "幅度 (dB)",
-        xTicks: makeLinearTicks(minFreq, maxFreq, 5, formatAxisValue),
+        xTicks: axis.ticks,
         yTicks: makeLinearTicks(paddedMinMag, paddedMaxMag, 5, formatAxisValue),
         minX: minFreq,
         maxX: maxFreq,
@@ -334,28 +375,43 @@ function drawSpectrumCanvas(canvas, freqs, magnitudes) {
 }
 
 function updateWindowSummary() {
-    const taskName = formatTaskName(visualizationState.task);
+    updateSpectrumFrequencyReference();
+    const packet = ["text_transmit", "adaptive_transmit"].includes(visualizationState.task);
+    const scan = !visualizationState.active && !packet && visualizationState.cognitive_scan?.run_id ? visualizationState.cognitive_scan : null;
+    const taskName = scan ? (scan.status === "scanning" ? "认知选频" : "上次认知选频") : formatTaskName(visualizationState.task);
 
     setText("viz-task-name", taskName);
-    setText("viz-center-freq", formatHz(visualizationState.center_freq_hz));
-    setText("viz-tone-freq", formatHz(visualizationState.tone_freq_hz));
-    setText("viz-sample-rate", formatHz(visualizationState.sample_rate_hz));
-    setText("viz-rx-power", formatDb(visualizationState.rx_power_db));
+    setText("viz-center-freq", formatHz(scan ? scan.current_freq_hz ?? scan.best_freq_hz ?? scan.center_freq_hz : visualizationState.center_freq_hz));
+    setText("viz-tone-freq", formatHz(scan ? null : visualizationState.tone_freq_hz));
+    setText("viz-sample-rate", formatHz(scan ? scan.sample_rate_hz : visualizationState.sample_rate_hz));
+    setText("viz-rx-power", formatDb(scan ? scan.min_power_db : visualizationState.rx_power_db));
+    setText("viz-rx-power-label", scan ? "最低接收功率" : packet ? "片段接收功率" : "接收功率");
     setText(
         "viz-peak-freq",
-        visualizationState.peak_freq_khz == null
+        scan || visualizationState.peak_freq_khz == null
             ? "--"
-            : `${Number(visualizationState.peak_freq_khz).toFixed(2)} kHz`,
+            : `${Number(visualizationState.peak_freq_khz).toFixed(4)} kHz`,
     );
 
     if (stopBtn) {
-        const canStop = visualizationState.active || hardwareBusy;
+        const canStop = visualizationState.active || scan?.status === "scanning" || hardwareBusy;
         stopBtn.disabled = !canStop;
         stopBtn.textContent = canStop ? "停止任务" : "当前无任务";
     }
 
     if (statusText) {
-        if (visualizationState.active) {
+        if (visualizationState.cognitive_scan?.status === "scanning") {
+            statusText.textContent = "正在扫描并比较候选频点，认知选频过程显示在下方。";
+        } else if (packet) {
+            const modulation = visualizationState.modulation_scheme || "--";
+            const phase = visualizationState.task_status === "stopped" ? "已停止" : "已完成";
+            const decode = visualizationState.decoded_ok == null ? "" : visualizationState.decoded_ok ? "解码成功。" : "未成功解码。";
+            statusText.textContent = visualizationState.active
+                ? `${taskName}（${modulation}）正在发送和接收，完成后显示本次接收采样快照。`
+                : visualizationState.task_status === "error"
+                    ? `${taskName}异常结束：${visualizationState.error || "未取得有效结果"}`
+                    : `${taskName}（${modulation}）${phase}。${decode}${hasFrameData() ? "IQ / FFT 显示本次接收数据中能量最高片段的快照。" : "本次没有可显示的有效 IQ / FFT 采样。"}`;
+        } else if (visualizationState.active) {
             statusText.textContent = hasFrameData()
                 ? `任务 ${taskName} 正在推送实时波形与频谱数据。`
                 : `任务 ${taskName} 已启动，正在等待第一帧 IQ / FFT 数据。`;
@@ -363,6 +419,8 @@ function updateWindowSummary() {
             statusText.textContent = "硬件任务正在运行或启动中，可点击停止任务释放 USRP。";
         } else if (visualizationState.error) {
             statusText.textContent = `上一次可视化任务异常结束：${visualizationState.error}`;
+        } else if (scan) {
+            statusText.textContent = `这里保留上次认知选频的${scan.status === "completed" ? "完整" : "部分"}结果，可回放比较过程。`;
         } else {
             statusText.textContent = "空闲中。从主控台发起可视化任务后，波形和频谱会显示在这里。";
         }
@@ -374,12 +432,12 @@ function updateWindowSummary() {
 }
 
 function renderPlots(force = false) {
-    const frameId = Number(visualizationState.frame_id || 0);
-    if (!force && frameId === lastRenderedFrameId) return;
+    const plotKey = `${visualizationState.activation_id}:${visualizationState.frame_id}:${visualizationState.sample_rate_hz}:${visualizationState.iq_inphase.length}:${visualizationState.fft_magnitude_db.length}`;
+    if (!force && plotKey === lastRenderedPlotKey) return;
 
     drawWaveformCanvas(iqCanvas, visualizationState.iq_inphase || [], visualizationState.iq_quadrature || []);
     drawSpectrumCanvas(fftCanvas, visualizationState.fft_freq_khz || [], visualizationState.fft_magnitude_db || []);
-    lastRenderedFrameId = frameId;
+    lastRenderedPlotKey = plotKey;
 }
 
 async function fetchVisualizationState() {
@@ -387,8 +445,12 @@ async function fetchVisualizationState() {
         const res = await fetch(VISUALIZATION_URL, { cache: "no-store" });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         visualizationState = normalizeVisualizationState(await res.json());
+        cognitiveView.update(visualizationState.cognitive_scan, {
+            historical: ["text_transmit", "adaptive_transmit", "tone_loopback"].includes(visualizationState.task),
+        });
     } catch (error) {
         console.error("Failed to fetch visualization state:", error);
+        cognitiveView.markUnavailable();
         visualizationState = normalizeVisualizationState({
             error: "Visualization feed unavailable",
         });

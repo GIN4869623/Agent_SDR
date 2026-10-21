@@ -49,6 +49,29 @@ class RouterTests(unittest.TestCase):
             frozenset({"select_clean_frequency", "transmit_text"}),
         )
 
+    def test_cognitive_sine_request_uses_cognitive_defaults_and_no_text_action(self) -> None:
+        _, plan = self.plan("在 2.4 GHz 附近进行认知选频并发送正弦波信号")
+        self.assertEqual(plan.skill.name, "auto_optimal_transmit")
+        self.assertEqual(plan.initial_allowed_tools, ("auto_optimal_transmit",))
+        self.assertEqual(plan.required_actions, frozenset({"select_clean_frequency", "visualize_tone"}))
+        self.assertIn("30000000", plan.skill.system_prompt)
+
+    def test_cognitive_scan_with_sine_still_excludes_fixed_scan_and_tone_skills(self) -> None:
+        _, plan = self.plan("扫描 2.4 GHz 附近并进行认知选频，然后发射正弦波")
+        self.assertEqual(plan.initial_allowed_tools, ("auto_optimal_transmit",))
+
+    def test_cognitive_progress_visualization_does_not_require_tone(self) -> None:
+        _, plan = self.plan("找干净频点并展示选频功率对比可视化，不发送")
+        self.assertEqual(plan.required_actions, frozenset({"select_clean_frequency"}))
+
+    def test_cognitive_text_and_tone_requires_both(self) -> None:
+        _, plan = self.plan("认知选频后发送文本“你好”，再显示 Tone 波形")
+        self.assertEqual(plan.required_actions, frozenset({"select_clean_frequency", "transmit_text", "visualize_tone"}))
+
+    def test_cognitive_unquoted_text_followed_by_tone_keeps_text_action(self) -> None:
+        _, plan = self.plan("认知选频后发送你好，然后显示 Tone 波形")
+        self.assertEqual(plan.required_actions, frozenset({"select_clean_frequency", "transmit_text", "visualize_tone"}))
+
     def test_explanation_then_execution_is_a_mixed_hardware_task(self) -> None:
         route, plan = self.plan("解释 BPSK，然后用 BPSK 发送你好")
         self.assertEqual(route.route, "hardware")

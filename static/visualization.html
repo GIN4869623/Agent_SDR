@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SDR 可视化监视窗</title>
-    <link rel="stylesheet" href="css/visualization-window.css?v=4">
+    <link rel="stylesheet" href="css/visualization-window.css?v=8">
 </head>
 <body>
     <main class="viz-shell">
@@ -38,7 +38,7 @@
                 <strong id="viz-sample-rate">--</strong>
             </article>
             <article class="viz-stat">
-                <span>接收功率</span>
+                <span id="viz-rx-power-label">接收功率</span>
                 <strong id="viz-rx-power">--</strong>
             </article>
             <article class="viz-stat">
@@ -63,19 +63,46 @@
                 <div class="viz-card-header">
                     <div>
                         <h2>FFT 频谱</h2>
-                        <p>显示后端最近一帧可视化数据的频域结果。</p>
+                        <p>横轴表示相对射频中心的频率偏移，中央 0 kHz 为中心频率。</p>
                     </div>
                     <span class="viz-chip viz-chip-warm">频域</span>
                 </div>
                 <canvas id="fft-canvas" class="viz-canvas"></canvas>
+                <p id="fft-frequency-reference" class="cognitive-muted" aria-live="off">0 kHz 对应射频中心频率；负值表示低于中心，正值表示高于中心。</p>
             </article>
         </section>
 
-        <section class="viz-footnote">
-            只要后端持续通过可视化接口发布数据，这个监视窗就能复用来显示后续的 SDR 波形和频谱任务。
+        <section class="viz-card cognitive-panel" aria-labelledby="cognitive-title">
+            <div class="viz-card-header">
+                <h2 id="cognitive-title">认知选频</h2>
+            </div>
+            <div class="cognitive-result">
+                <div><span id="cognitive-best-label">当前最低功率频点</span><strong id="cognitive-best">--</strong></div>
+                <div><span>平均接收功率（相对 dB）</span><strong id="cognitive-power">--</strong></div>
+                <div><span>扫描进度</span><strong id="cognitive-count">0 / 0</strong></div>
+            </div>
+            <progress id="cognitive-progress" value="0" max="1" aria-label="候选频点扫描进度"></progress>
+            <p id="cognitive-status" role="status" hidden></p>
+            <svg id="cognitive-chart" viewBox="0 0 760 300" role="img" aria-label="候选频点平均接收功率对比"></svg>
+            <p class="cognitive-muted">横轴：候选中心频率（MHz） · 纵轴：平均接收功率（相对 dB）。绿色点代表当前最低功率，空心点代表尚未获得有效测量，红色点代表无效采样。只比较离散候选频点。</p>
+            <div class="cognitive-controls">
+                <button type="button" class="viz-btn viz-btn-secondary" id="cognitive-replay" disabled>回放比较过程</button>
+                <label for="cognitive-step">查看第 <output id="cognitive-step-value">0</output> 步</label>
+                <input type="range" id="cognitive-step" min="0" max="0" value="0" disabled aria-label="回放到第几个候选频点">
+                <button type="button" class="viz-btn viz-btn-secondary" id="cognitive-demo">示例演示</button>
+                <button type="button" class="viz-btn viz-btn-secondary" id="cognitive-live" hidden>返回实测</button>
+            </div>
+            <details class="cognitive-details">
+                <summary>查看每个候选频点的测量值</summary>
+                <div class="cognitive-table-wrap"><table>
+                    <thead><tr><th scope="col">频点（MHz）</th><th scope="col">功率（相对 dB）</th><th scope="col">比较结果</th></tr></thead>
+                    <tbody id="cognitive-table"></tbody>
+                </table></div>
+            </details>
         </section>
     </main>
 
-    <script src="js/visualization-window.js?v=5"></script>
+    <script src="js/cognitive-selection.js?v=5"></script>
+    <script src="js/visualization-window.js?v=8"></script>
 </body>
 </html>

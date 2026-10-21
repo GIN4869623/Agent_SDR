@@ -1,5 +1,27 @@
 * { box-sizing: border-box; }
 
+[hidden] { display: none !important; }
+.cognitive-panel { border-color: rgba(52, 211, 153, 0.28); }
+.cognitive-muted { color: var(--muted); font-size: 0.8rem; line-height: 1.7; }
+.cognitive-result { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 16px 0; }
+.cognitive-result > div { padding: 14px; background: rgba(2, 6, 23, 0.4); border-radius: 12px; display: flex; flex-direction: column; gap: 8px; }
+.cognitive-result span { font-size: 0.8rem; color: var(--muted); }
+.cognitive-result strong { font-size: 1.3rem; color: var(--green); }
+#cognitive-progress { width: 100%; height: 8px; accent-color: var(--green); }
+#cognitive-status { font-size: 0.88rem; line-height: 1.7; min-height: 1.7em; }
+#cognitive-chart { display: block; width: 100%; background: rgba(2, 6, 23, 0.55); border-radius: 12px; }
+.cognitive-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 16px 0; }
+.cognitive-controls label { font-size: 0.8rem; white-space: nowrap; color: var(--muted); }
+.cognitive-controls input { flex: 1; min-width: 120px; accent-color: var(--green); }
+.cognitive-details summary { cursor: pointer; font-size: 0.84rem; padding: 12px 0; color: var(--cyan); }
+.cognitive-table-wrap { overflow-x: auto; }
+.cognitive-details table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+.cognitive-details th, .cognitive-details td { padding: 10px; border-bottom: 1px solid var(--line); text-align: left; }
+.cognitive-selected { color: var(--green); background: rgba(52, 211, 153, 0.07); }
+@media (max-width: 760px) {
+    .cognitive-result { grid-template-columns: 1fr; }
+}
+
 :root {
     --bg: #020617;
     --panel: rgba(15, 23, 42, 0.9);
@@ -34,8 +56,7 @@ html, body {
 
 .viz-hero,
 .viz-summary,
-.viz-stage,
-.viz-footnote {
+.viz-stage {
     width: 100%;
 }
 
@@ -213,16 +234,6 @@ html, body {
     border: 1px solid rgba(148, 163, 184, 0.12);
 }
 
-.viz-footnote {
-    padding: 16px 18px;
-    border-radius: 18px;
-    border: 1px dashed rgba(148, 163, 184, 0.18);
-    background: rgba(2, 6, 23, 0.22);
-    color: var(--muted);
-    font-size: 0.84rem;
-    line-height: 1.65;
-}
-
 body.embedded-mode {
     background:
         radial-gradient(circle at 12% 18%, rgba(56, 189, 248, 0.08), transparent 22%),
@@ -245,8 +256,7 @@ body.embedded-mode {
 }
 
 .embedded-mode .viz-card,
-.embedded-mode .viz-stat,
-.embedded-mode .viz-footnote {
+.embedded-mode .viz-stat {
     border-radius: 18px;
 }
 

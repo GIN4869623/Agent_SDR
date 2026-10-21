@@ -13,6 +13,7 @@ trigger_keywords:
   - scan
 exclude_patterns:
   - "(干净|最优|最佳|最低|最小).{0,8}(信道|频点|频段|频带)"
+  - "认知选频|认知无线|搜索.{0,5}频点|选择.{0,5}频段"
 tool_names:
   - perform_physical_scan
 workflow: atomic

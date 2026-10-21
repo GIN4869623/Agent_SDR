@@ -4,6 +4,7 @@ import asyncio
 import json
 import tempfile
 import unittest
+import httpx
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import patch
@@ -12,6 +13,8 @@ from skill.skill_spec import SkillRegistry
 from skill.skills import _load_skills
 from src.agent.loop import AgentLoop
 from src.agent.trace import RunTraceStore
+from src.config import Settings
+from src.llm import create_async_llm_client
 
 
 def text_chunk(text: str):
@@ -31,8 +34,10 @@ class FakeCompletions:
     def __init__(self, turns: list[list[object]]) -> None:
         self.turns = turns
         self.index = 0
+        self.requests = []
 
     def create(self, **_kwargs):
+        self.requests.append(_kwargs)
         turn = self.turns[self.index]
         self.index += 1
         return iter(turn)
@@ -179,6 +184,86 @@ class AgentLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done["completed_actions"], ["scan_spectrum"])
         self.assertTrue(done["run_id"])
         self.assertEqual(done["diagnosis"]["stage"], "completed")
+
+    async def test_deepseek_thinking_stream_preserves_reasoning_across_tool_and_retry(self) -> None:
+        config = Settings(llm_provider="deepseek", deepseek_api_key="test-key")
+        requests = []
+        turns = [
+            [{"reasoning_content": "准备"}, {"reasoning_content": "扫描"}],
+            [{"reasoning_content": "执行扫描"}, {"tool_calls": [{
+                "index": 0, "id": "scan-1", "type": "function",
+                "function": {"name": "perform_physical_scan", "arguments": "{}"},
+            }]}],
+            [{"reasoning_content": "扫描完成"}, {"content": "扫描完成。"}],
+        ]
+
+        def respond(request):
+            self.assertEqual(str(request.url), "https://api.deepseek.com/chat/completions")
+            self.assertEqual(request.headers["authorization"], "Bearer test-key")
+            payload = json.loads(request.content)
+            deltas = turns[len(requests)]
+            requests.append(payload)
+            chunks = [{
+                "id": "response-1", "object": "chat.completion.chunk", "created": 1,
+                "model": config.deepseek_model_think,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+            } for delta in deltas]
+            body = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+        memory = FakeMemory()
+        async with create_async_llm_client(
+            config, http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        ) as client:
+            agent = AgentLoop(
+                client, FakeTools({"perform_physical_scan": {"status": "success"}}),
+                self.skills, memory, config=config,
+            )
+            with patch("src.agent.loop.report_to_console"):
+                events = [event async for event in agent.run_stream("帮我扫描 2.4 GHz 底噪", "cloud")]
+
+        self.assertEqual(len(requests), 3)
+        for request in requests:
+            self.assertEqual(request["thinking"], {"type": "enabled"})
+            self.assertNotIn("temperature", request)
+            self.assertEqual(request["model"], config.deepseek_model_think)
+            if "tools" in request:
+                self.assertEqual(request["tool_choice"], "auto")
+        retry_assistants = [msg for msg in requests[1]["messages"] if msg["role"] == "assistant"]
+        self.assertEqual(retry_assistants[0]["reasoning_content"], "准备扫描")
+        tool_assistant = next(msg for msg in requests[2]["messages"] if msg.get("tool_calls"))
+        self.assertEqual(tool_assistant["reasoning_content"], "执行扫描")
+        self.assertTrue(any(msg["role"] == "tool" and msg["tool_call_id"] == "scan-1" for msg in requests[2]["messages"]))
+        done = next(event for event in events if event["type"] == "done")
+        self.assertEqual(done["status"], "success")
+        self.assertEqual(done["reply"], "扫描完成。")
+        self.assertEqual(memory.value[-1]["reasoning_content"], "扫描完成")
+        self.assertEqual("".join(event["text"] for event in events if event["type"] == "delta"), "扫描完成。")
+
+    async def test_deepseek_fast_disables_thinking_and_keeps_temperature(self) -> None:
+        config = Settings(llm_provider="deepseek", deepseek_api_key="test-key")
+        llm = FakeLLM([[text_chunk("你好。")]])
+        agent = AgentLoop(llm, FakeTools({}), self.skills, FakeMemory(), config=config)
+        with patch("src.agent.loop.report_to_console"):
+            events = [event async for event in agent.run_stream("你好", "cloud-fast", mode="fast", temperature=0.4)]
+        request = llm.chat.completions.requests[0]
+        self.assertEqual(request["model"], config.deepseek_model_fast)
+        self.assertEqual(request["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertEqual(request["temperature"], 0.4)
+        self.assertTrue(any(event["type"] == "done" for event in events))
+
+    async def test_local_requests_do_not_receive_deepseek_options(self) -> None:
+        config = Settings(llm_provider="local", model_think="local-think")
+        llm = FakeLLM([[tool_chunk("perform_physical_scan", {})], [text_chunk("完成。")]])
+        agent = AgentLoop(llm, FakeTools({"perform_physical_scan": {"status": "success"}}), self.skills, FakeMemory(), config=config)
+        with patch("src.agent.loop.report_to_console"):
+            events = [event async for event in agent.run_stream("帮我扫描 2.4 GHz 底噪", "local")]
+        request = llm.chat.completions.requests[0]
+        self.assertEqual(request["model"], "local-think")
+        self.assertEqual(request["tool_choice"], "required")
+        self.assertIn("temperature", request)
+        self.assertNotIn("extra_body", request)
+        self.assertTrue(any(event.get("status") == "success" for event in events))
 
     async def test_knowledge_fallback_opens_web_only_after_local_empty(self) -> None:
         done = await self.run_agent(

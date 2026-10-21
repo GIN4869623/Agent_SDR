@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -26,6 +27,10 @@ _load_env_file(BASE_DIR / ".env")
 
 class Settings(BaseModel):
     app_name: str = "Agent SDR Control Hub"
+    llm_provider: Literal["local", "deepseek"] = Field(
+        default_factory=lambda: os.getenv("LLM_PROVIDER", "local").strip().lower(),
+        validate_default=True,
+    )
     ollama_base_url: str = Field(
         default=os.getenv("OLLAMA_BASE_URL", "http://10.224.184.16:11434/v1")
     )
@@ -35,6 +40,18 @@ class Settings(BaseModel):
     # ── Models ──
     model_think: str = Field(default=os.getenv("MODEL_THINK", "qwen3.5:122b"))
     model_fast: str = Field(default=os.getenv("MODEL_FAST", "qwen3.5:35b"))
+    deepseek_base_url: str = Field(
+        default_factory=lambda: os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").strip()
+    )
+    deepseek_api_key: SecretStr = Field(
+        default_factory=lambda: SecretStr(os.getenv("DEEPSEEK_API_KEY", "").strip())
+    )
+    deepseek_model_think: str = Field(
+        default_factory=lambda: os.getenv("DEEPSEEK_MODEL_THINK", "deepseek-flash").strip()
+    )
+    deepseek_model_fast: str = Field(
+        default_factory=lambda: os.getenv("DEEPSEEK_MODEL_FAST", "deepseek-flash").strip()
+    )
     temperature_think: float = Field(
         default=float(os.getenv("TEMPERATURE_THINK", "0.35"))
     )
@@ -85,7 +102,31 @@ class Settings(BaseModel):
 
     @property
     def model_map(self) -> dict[str, str]:
+        if self.llm_provider == "deepseek":
+            return {"think": self.deepseek_model_think, "fast": self.deepseek_model_fast}
         return {"think": self.model_think, "fast": self.model_fast}
+
+    @property
+    def llm_base_url(self) -> str:
+        return self.deepseek_base_url if self.llm_provider == "deepseek" else self.ollama_base_url
+
+    @property
+    def llm_api_key(self) -> str:
+        if self.llm_provider == "deepseek":
+            return self.deepseek_api_key.get_secret_value()
+        return self.api_key
+
+    def validate_llm_config(self) -> None:
+        """Fail before opening a client rather than sending invalid credentials."""
+        if self.llm_provider == "deepseek":
+            for name, value in {
+                "DEEPSEEK_API_KEY": self.llm_api_key,
+                "DEEPSEEK_BASE_URL": self.deepseek_base_url,
+                "DEEPSEEK_MODEL_THINK": self.deepseek_model_think,
+                "DEEPSEEK_MODEL_FAST": self.deepseek_model_fast,
+            }.items():
+                if not value.strip():
+                    raise ValueError(f"LLM_PROVIDER=deepseek 时必须配置 {name}")
 
     @property
     def temperature_map(self) -> dict[str, float]:
